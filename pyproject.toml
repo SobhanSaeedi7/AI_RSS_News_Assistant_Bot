@@ -1,0 +1,27 @@
+[project]
+name = "ai-rss-news-assistant"
+version = "0.1.0"
+description = "Telegram bot for RSS feed management, AI-powered news summarization, automatic delivery, and grounded news Q&A"
+readme = "README.md"
+authors = [
+    { name = "Sobhan Saeedi", email = "Sobi.S.K2007@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "feedparser>=6.0.14",
+    "python-dotenv>=1.2.4",
+    "python-telegram-bot>=22.8",
+]
+
+[project.scripts]
+ai-rss-news-assistant = "ai_rss_news_assistant:main"
+
+[build-system]
+requires = ["uv_build>=0.12.22,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
+]
