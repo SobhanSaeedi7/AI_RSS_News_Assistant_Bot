@@ -19,9 +19,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     # --- Telegram ---
-    bot_token: str = Field(
-        ...,
-        description="Telegram bot token provided by @BotFather",
+    bot_token: str | None = Field(
+        None,
+        description="Telegram bot token provided by @BotFather (required by the bot service, not by the worker)",
     )
 
     # --- Application ---

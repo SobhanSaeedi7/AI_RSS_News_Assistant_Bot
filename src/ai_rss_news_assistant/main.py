@@ -16,8 +16,14 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
-    """Initialize the bot process: configuration and logging only."""
+    """Initialize the bot process: configuration and logging only.
+
+    The bot service requires a Telegram bot token; it is validated here so the
+    worker process can start without it.
+    """
     settings = Settings()
+    if settings.bot_token is None:
+        raise ValueError("BOT_TOKEN is required for the bot service")
     setup_logging(settings.log_level)
     logger.info("bot process starting (app_env=%s)", settings.app_env)
 
@@ -25,8 +31,9 @@ def main() -> None:
 def worker() -> None:
     """Initialize the worker process: configuration and logging only.
 
-    RSS polling, summarization, and scheduled delivery are implemented in a
-    later milestone and are intentionally absent here.
+    The worker service does not interact with Telegram, so it does not require
+    BOT_TOKEN. RSS polling, summarization, and scheduled delivery are
+    implemented in a later milestone and are intentionally absent here.
     """
     settings = Settings()
     setup_logging(settings.log_level)
