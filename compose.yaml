@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ai_rss_news}
       POSTGRES_USER: ${POSTGRES_USER:-ai_rss_news}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
       # Named volume persists PostgreSQL data across container recreations.
       - db_data:/var/lib/postgresql/data
@@ -26,8 +26,8 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      DATABASE_URL: ${DATABASE_URL}
-      BOT_TOKEN: ${BOT_TOKEN}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ai_rss_news}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:-ai_rss_news}
+      BOT_TOKEN: ${BOT_TOKEN:?BOT_TOKEN is required}
     command: ["main"]
     restart: unless-stopped
 
@@ -41,7 +41,7 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ai_rss_news}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:-ai_rss_news}
     command: ["worker"]
     restart: unless-stopped
 
