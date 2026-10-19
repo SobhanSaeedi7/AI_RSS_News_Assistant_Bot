@@ -8,10 +8,13 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.13.0",
+    "asyncpg>=0.30.0",
     "feedparser>=6.0.14",
     "pydantic-settings>=2.16.0",
     "python-dotenv>=1.2.4",
     "python-telegram-bot>=22.8",
+    "sqlalchemy[asyncio]>=2.0.40",
 ]
 
 [project.scripts]
