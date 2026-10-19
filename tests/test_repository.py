@@ -19,21 +19,37 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from ai_rss_news_assistant.db.base import Base
-from ai_rss_news_assistant.db.models import NewsDelivery, NewsItem, User, UserFeed
+from ai_rss_news_assistant.db.models import (
+    ChatMessage,
+    Conversation,
+    NewsDelivery,
+    NewsItem,
+    User,
+    UserFeed,
+)
 from ai_rss_news_assistant.db.repository import (
+    create_conversation,
     create_delivery,
     create_feed,
+    create_message,
+    create_message_citation,
     create_news_item,
     create_user,
     deactivate_user,
+    delete_conversation,
     delete_feed,
+    get_conversation,
     get_delivery,
     get_feed,
+    get_message,
     get_news_item,
     get_user_by_id,
     get_user_by_telegram_id,
+    list_conversations,
     list_deliveries,
     list_feeds,
+    list_message_citations,
+    list_messages,
     list_news_items,
     update_feed,
     update_user_settings,
@@ -94,6 +110,33 @@ async def _add_news_item(
     session.add(item)
     await session.flush()
     return item
+
+
+async def _add_conversation(
+    session: AsyncSession, user: User, title: str | None = None
+) -> Conversation:
+    conversation = Conversation(user_id=user.id, title=title)
+    session.add(conversation)
+    await session.flush()
+    return conversation
+
+
+async def _add_message(
+    session: AsyncSession,
+    user: User,
+    conversation: Conversation,
+    role: str = "user",
+    content: str = "Hello",
+) -> ChatMessage:
+    message = ChatMessage(
+        user_id=user.id,
+        conversation_id=conversation.id,
+        role=role,
+        content=content,
+    )
+    session.add(message)
+    await session.flush()
+    return message
 
 
 @pytest.mark.anyio
@@ -590,5 +633,338 @@ async def test_duplicate_delivery_rejected() -> None:
 
         with pytest.raises(IntegrityError):
             await create_delivery(session, user.id, item.id)
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_create_and_get_conversation() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=3200)
+        conversation = await create_conversation(session, user.id, title="My Chat")
+
+        fetched = await get_conversation(session, user.id, conversation.id)
+        assert fetched is not None
+        assert fetched.id == conversation.id
+        assert fetched.user_id == user.id
+        assert fetched.title == "My Chat"
+        assert fetched.created_at is not None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_get_conversation_requires_owner() -> None:
+    session = await _create_session()
+    try:
+        owner = await _add_user(session, telegram_user_id=3300)
+        other = await _add_user(session, telegram_user_id=3400)
+        conversation = await create_conversation(session, owner.id, title="Owner Chat")
+
+        fetched = await get_conversation(session, owner.id, conversation.id)
+        assert fetched is not None
+        assert fetched.id == conversation.id
+
+        not_fetched = await get_conversation(session, other.id, conversation.id)
+        assert not_fetched is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_get_conversation_not_found() -> None:
+    session = await _create_session()
+    try:
+        assert await get_conversation(session, uuid.uuid4(), uuid.uuid4()) is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_list_conversations_user_isolation() -> None:
+    session = await _create_session()
+    try:
+        user_a = await _add_user(session, telegram_user_id=3500)
+        user_b = await _add_user(session, telegram_user_id=3600)
+        await _add_conversation(session, user_a, title="Chat A")
+        await _add_conversation(session, user_b, title="Chat B")
+
+        conversations_a = await list_conversations(session, user_a.id)
+        conversations_b = await list_conversations(session, user_b.id)
+
+        assert len(conversations_a) == 1
+        assert all(c.user_id == user_a.id for c in conversations_a)
+        assert len(conversations_b) == 1
+        assert conversations_b[0].user_id == user_b.id
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_delete_conversation_by_owner() -> None:
+    session = await _create_session()
+    try:
+        owner = await _add_user(session, telegram_user_id=3700)
+        conversation = await create_conversation(session, owner.id, title="To Delete")
+
+        assert await delete_conversation(session, owner.id, conversation.id) is True
+        assert await delete_conversation(session, owner.id, conversation.id) is False
+
+        other = await _add_user(session, telegram_user_id=3800)
+        conversation2 = await create_conversation(session, other.id, title="Other")
+        assert await delete_conversation(session, owner.id, conversation2.id) is False
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_create_message_for_owned_conversation() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=3900)
+        conversation = await _add_conversation(session, user)
+
+        message = await create_message(
+            session,
+            user.id,
+            conversation.id,
+            role="user",
+            content="Hello, world!",
+        )
+
+        assert message is not None
+        assert message.user_id == user.id
+        assert message.conversation_id == conversation.id
+        assert message.role == "user"
+        assert message.content == "Hello, world!"
+        assert message.created_at is not None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_create_message_rejects_another_users_conversation() -> None:
+    session = await _create_session()
+    try:
+        owner = await _add_user(session, telegram_user_id=4000)
+        other = await _add_user(session, telegram_user_id=4100)
+        conversation = await _add_conversation(session, owner)
+
+        message = await create_message(
+            session,
+            other.id,
+            conversation.id,
+            role="user",
+            content="Should not be allowed",
+        )
+        assert message is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_get_message_requires_owner() -> None:
+    session = await _create_session()
+    try:
+        owner = await _add_user(session, telegram_user_id=4200)
+        other = await _add_user(session, telegram_user_id=4300)
+        conversation = await _add_conversation(session, owner)
+        message = await _add_message(session, owner, conversation)
+
+        fetched = await get_message(session, owner.id, message.id)
+        assert fetched is not None
+        assert fetched.id == message.id
+
+        not_fetched = await get_message(session, other.id, message.id)
+        assert not_fetched is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_list_messages_user_isolation_and_ordering() -> None:
+    session = await _create_session()
+    try:
+        user_a = await _add_user(session, telegram_user_id=4400)
+        user_b = await _add_user(session, telegram_user_id=4500)
+        conversation_a = await _add_conversation(session, user_a)
+        conversation_b = await _add_conversation(session, user_b)
+
+        msg_a1 = await _add_message(
+            session, user_a, conversation_a, role="user", content="First"
+        )
+        msg_a2 = await _add_message(
+            session, user_a, conversation_a, role="assistant", content="Second"
+        )
+        await _add_message(
+            session, user_b, conversation_b, role="user", content="Other user"
+        )
+
+        messages_a = await list_messages(session, user_a.id, conversation_a.id)
+
+        assert len(messages_a) == 2
+        assert messages_a[0].id == msg_a1.id
+        assert messages_a[0].content == "First"
+        assert messages_a[1].id == msg_a2.id
+        assert messages_a[1].content == "Second"
+        assert all(m.user_id == user_a.id for m in messages_a)
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_list_messages_empty_for_other_conversation() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=4600)
+        conversation_a = await _add_conversation(session, user)
+        conversation_b = await _add_conversation(session, user)
+        await _add_message(session, user, conversation_a)
+
+        messages_b = await list_messages(session, user.id, conversation_b.id)
+        assert messages_b == []
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_create_message_citation_for_own_message_and_news() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=4700)
+        conversation = await _add_conversation(session, user)
+        message = await _add_message(session, user, conversation)
+        feed = await _add_feed(session, user)
+        item = await _add_news_item(
+            session, user, feed, url="https://example.com/article/1"
+        )
+
+        citation = await create_message_citation(session, user.id, message.id, item.id)
+
+        assert citation is not None
+        assert citation.user_id == user.id
+        assert citation.chat_message_id == message.id
+        assert citation.news_item_id == item.id
+        assert citation.created_at is not None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_create_citation_rejects_another_users_message() -> None:
+    session = await _create_session()
+    try:
+        owner = await _add_user(session, telegram_user_id=4800)
+        other = await _add_user(session, telegram_user_id=4900)
+        conversation = await _add_conversation(session, owner)
+        message = await _add_message(session, owner, conversation)
+        feed = await _add_feed(session, owner)
+        item = await _add_news_item(
+            session, owner, feed, url="https://example.com/article/1"
+        )
+
+        citation = await create_message_citation(session, other.id, message.id, item.id)
+        assert citation is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_create_citation_rejects_another_users_news() -> None:
+    session = await _create_session()
+    try:
+        owner = await _add_user(session, telegram_user_id=5000)
+        other = await _add_user(session, telegram_user_id=5100)
+        feed_other = await _add_feed(
+            session, other, url="https://other.example.com/feed.xml"
+        )
+        conversation = await _add_conversation(session, owner)
+        message = await _add_message(session, owner, conversation)
+        item_other = await _add_news_item(
+            session, other, feed_other, url="https://other.example.com/article/1"
+        )
+
+        citation = await create_message_citation(
+            session, owner.id, message.id, item_other.id
+        )
+        assert citation is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_create_citation_nonexistent_message() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=5200)
+        feed = await _add_feed(session, user)
+        item = await _add_news_item(
+            session, user, feed, url="https://example.com/article/1"
+        )
+
+        citation = await create_message_citation(
+            session, user.id, uuid.uuid4(), item.id
+        )
+        assert citation is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_list_message_citations_user_isolation() -> None:
+    session = await _create_session()
+    try:
+        user_a = await _add_user(session, telegram_user_id=5300)
+        user_b = await _add_user(session, telegram_user_id=5400)
+        conversation_a = await _add_conversation(session, user_a)
+        conversation_b = await _add_conversation(session, user_b)
+        message_a = await _add_message(session, user_a, conversation_a)
+        message_b = await _add_message(session, user_b, conversation_b)
+        feed_a = await _add_feed(session, user_a, url="https://a.example.com/feed.xml")
+        feed_b = await _add_feed(session, user_b, url="https://b.example.com/feed.xml")
+        item_a = await _add_news_item(
+            session, user_a, feed_a, url="https://a.example.com/a1"
+        )
+        item_b = await _add_news_item(
+            session, user_b, feed_b, url="https://b.example.com/b1"
+        )
+
+        await create_message_citation(session, user_a.id, message_a.id, item_a.id)
+        await create_message_citation(session, user_b.id, message_b.id, item_b.id)
+
+        citations_a = await list_message_citations(session, user_a.id, message_a.id)
+        citations_b = await list_message_citations(session, user_b.id, message_b.id)
+
+        assert len(citations_a) == 1
+        assert citations_a[0].user_id == user_a.id
+        assert citations_a[0].news_item_id == item_a.id
+        assert len(citations_b) == 1
+        assert citations_b[0].user_id == user_b.id
+        assert citations_b[0].news_item_id == item_b.id
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_delete_conversation_cascades_to_messages_and_citations() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=5500)
+        conversation = await _add_conversation(session, user)
+        message = await _add_message(session, user, conversation)
+        feed = await _add_feed(session, user)
+        item = await _add_news_item(
+            session, user, feed, url="https://example.com/article/1"
+        )
+        await create_message_citation(session, user.id, message.id, item.id)
+
+        assert await delete_conversation(session, user.id, conversation.id) is True
+
+        messages = await list_messages(session, user.id, conversation.id)
+        assert messages == []
+
+        citations = await list_message_citations(session, user.id, message.id)
+        assert citations == []
     finally:
         await _close_session(session)

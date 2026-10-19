@@ -21,7 +21,15 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ai_rss_news_assistant.db.models import NewsDelivery, NewsItem, User, UserFeed
+from ai_rss_news_assistant.db.models import (
+    ChatMessage,
+    Conversation,
+    MessageCitation,
+    NewsDelivery,
+    NewsItem,
+    User,
+    UserFeed,
+)
 from ai_rss_news_assistant.db.url_normalization import normalize_url
 
 
@@ -269,3 +277,199 @@ async def list_deliveries(
         query = query.offset(offset)
     result = await session.execute(query)
     return list(result.scalars().all())
+
+
+async def create_conversation(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    title: str | None = None,
+) -> Conversation:
+    """Create a conversation owned by ``user_id``."""
+    conversation = Conversation(user_id=user_id, title=title)
+    session.add(conversation)
+    await session.flush()
+    return conversation
+
+
+async def get_conversation(
+    session: AsyncSession, user_id: uuid.UUID, conversation_id: uuid.UUID
+) -> Conversation | None:
+    result = await session.execute(
+        select(Conversation).where(
+            Conversation.id == conversation_id, Conversation.user_id == user_id
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def list_conversations(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> list[Conversation]:
+    query = (
+        select(Conversation)
+        .where(Conversation.user_id == user_id)
+        .order_by(Conversation.updated_at.desc())
+    )
+    if limit is not None:
+        query = query.limit(limit)
+    if offset is not None:
+        query = query.offset(offset)
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+async def delete_conversation(
+    session: AsyncSession, user_id: uuid.UUID, conversation_id: uuid.UUID
+) -> bool:
+    """Delete a conversation owned by ``user_id``.
+
+    Returns ``False`` when no matching conversation exists.
+    """
+    result = await session.execute(
+        select(Conversation).where(
+            Conversation.id == conversation_id, Conversation.user_id == user_id
+        )
+    )
+    conversation = result.scalar_one_or_none()
+    if conversation is None:
+        return False
+    await session.delete(conversation)
+    await session.flush()
+    return True
+
+
+async def create_message(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    role: str,
+    content: str,
+) -> ChatMessage | None:
+    """Create a message for a conversation owned by ``user_id``.
+
+    Returns ``None`` if the conversation does not exist or is not owned by
+    ``user_id``.
+    """
+    conversation = await session.execute(
+        select(Conversation).where(
+            Conversation.id == conversation_id, Conversation.user_id == user_id
+        )
+    )
+    if conversation.scalar_one_or_none() is None:
+        return None
+
+    message = ChatMessage(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        role=role,
+        content=content,
+    )
+    session.add(message)
+    await session.flush()
+    return message
+
+
+async def get_message(
+    session: AsyncSession, user_id: uuid.UUID, message_id: uuid.UUID
+) -> ChatMessage | None:
+    result = await session.execute(
+        select(ChatMessage).where(
+            ChatMessage.id == message_id, ChatMessage.user_id == user_id
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def list_messages(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> list[ChatMessage]:
+    query = (
+        select(ChatMessage)
+        .where(
+            ChatMessage.user_id == user_id,
+            ChatMessage.conversation_id == conversation_id,
+        )
+        .order_by(ChatMessage.created_at.asc())
+    )
+    if limit is not None:
+        query = query.limit(limit)
+    if offset is not None:
+        query = query.offset(offset)
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+async def create_message_citation(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    chat_message_id: uuid.UUID,
+    news_item_id: uuid.UUID,
+) -> MessageCitation | None:
+    """Create a citation linking a user's message to a user's news item.
+
+    Returns ``None`` if either the message or the news item does not exist or
+    is not owned by ``user_id``.
+    """
+    message = await session.execute(
+        select(ChatMessage).where(
+            ChatMessage.id == chat_message_id, ChatMessage.user_id == user_id
+        )
+    )
+    if message.scalar_one_or_none() is None:
+        return None
+
+    news = await session.execute(
+        select(NewsItem).where(NewsItem.id == news_item_id, NewsItem.user_id == user_id)
+    )
+    if news.scalar_one_or_none() is None:
+        return None
+
+    citation = MessageCitation(
+        user_id=user_id,
+        chat_message_id=chat_message_id,
+        news_item_id=news_item_id,
+    )
+    session.add(citation)
+    await session.flush()
+    return citation
+
+
+async def list_message_citations(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    chat_message_id: uuid.UUID,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> list[MessageCitation]:
+    query = (
+        select(MessageCitation)
+        .where(
+            MessageCitation.user_id == user_id,
+            MessageCitation.chat_message_id == chat_message_id,
+        )
+        .order_by(MessageCitation.created_at.asc())
+    )
+    if limit is not None:
+        query = query.limit(limit)
+    if offset is not None:
+        query = query.offset(offset)
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+async def get_message_citation(
+    session: AsyncSession, user_id: uuid.UUID, citation_id: uuid.UUID
+) -> MessageCitation | None:
+    result = await session.execute(
+        select(MessageCitation).where(
+            MessageCitation.id == citation_id, MessageCitation.user_id == user_id
+        )
+    )
+    return result.scalar_one_or_none()
