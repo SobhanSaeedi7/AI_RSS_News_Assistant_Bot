@@ -20,6 +20,11 @@ RUN uv pip install --system --no-cache -r requirements.txt
 COPY README.md ./
 COPY src ./src
 
+# Copy Alembic migration configuration and scripts so `alembic` can be run
+# from inside the container without baking in secrets.
+COPY alembic.ini ./
+COPY alembic/ ./alembic/
+
 # Install the project itself.
 RUN uv pip install --system --no-cache -e .
 
