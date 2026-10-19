@@ -1,13 +1,14 @@
 """initial schema
 
 Revision ID: 0001_initial_schema
-Revises: 
+Revises:
 Create Date: 2026-10-19 00:00:00.000000
 """
 
 from __future__ import annotations
 
 import sqlalchemy as sa
+
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -45,9 +46,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_users")),
-        sa.UniqueConstraint(
-            "telegram_user_id", name=op.f("uq_users_telegram_user_id")
-        ),
+        sa.UniqueConstraint("telegram_user_id", name=op.f("uq_users_telegram_user_id")),
     )
     op.create_index(
         op.f("ix_users_telegram_user_id"),
@@ -60,9 +59,7 @@ def upgrade() -> None:
     op.create_table(
         "user_feeds",
         sa.Column("id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column(
-            "user_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False
-        ),
+        sa.Column("user_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("url", sa.String(), nullable=False),
         sa.Column("title", sa.String(), nullable=True),
         sa.Column("last_fetched_at", sa.DateTime(timezone=True), nullable=True),
@@ -82,12 +79,8 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_user_feeds")),
-        sa.UniqueConstraint(
-            "user_id", "url", name=op.f("uq_user_feeds_user_id_url")
-        ),
-        sa.UniqueConstraint(
-            "user_id", "id", name=op.f("uq_user_feeds_user_id_id")
-        ),
+        sa.UniqueConstraint("user_id", "url", name=op.f("uq_user_feeds_user_id_url")),
+        sa.UniqueConstraint("user_id", "id", name=op.f("uq_user_feeds_user_id_id")),
     )
     op.create_index(
         op.f("ix_user_feeds_user_id"), "user_feeds", ["user_id"], unique=False
@@ -103,12 +96,8 @@ def upgrade() -> None:
     op.create_table(
         "news_items",
         sa.Column("id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column(
-            "user_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False
-        ),
-        sa.Column(
-            "feed_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False
-        ),
+        sa.Column("user_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("feed_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("title", sa.String(), nullable=False),
         sa.Column("url", sa.String(), nullable=False),
         sa.Column("content", sa.Text(), nullable=True),
@@ -134,12 +123,8 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_news_items")),
-        sa.UniqueConstraint(
-            "feed_id", "url", name=op.f("uq_news_items_feed_id_url")
-        ),
-        sa.UniqueConstraint(
-            "user_id", "id", name=op.f("uq_news_items_user_id_id")
-        ),
+        sa.UniqueConstraint("feed_id", "url", name=op.f("uq_news_items_feed_id_url")),
+        sa.UniqueConstraint("user_id", "id", name=op.f("uq_news_items_user_id_id")),
     )
     op.create_index(
         op.f("ix_news_items_user_id"), "news_items", ["user_id"], unique=False
@@ -158,9 +143,7 @@ def upgrade() -> None:
     op.create_table(
         "news_deliveries",
         sa.Column("id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column(
-            "user_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False
-        ),
+        sa.Column("user_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column(
             "news_item_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False
         ),
@@ -206,9 +189,7 @@ def upgrade() -> None:
     op.create_table(
         "conversations",
         sa.Column("id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column(
-            "user_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False
-        ),
+        sa.Column("user_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("title", sa.String(), nullable=True),
         sa.Column(
             "created_at",
@@ -229,9 +210,7 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_conversations")),
-        sa.UniqueConstraint(
-            "user_id", "id", name=op.f("uq_conversations_user_id_id")
-        ),
+        sa.UniqueConstraint("user_id", "id", name=op.f("uq_conversations_user_id_id")),
     )
     op.create_index(
         op.f("ix_conversations_user_id"),
@@ -249,9 +228,7 @@ def upgrade() -> None:
             sa.dialects.postgresql.UUID(as_uuid=True),
             nullable=False,
         ),
-        sa.Column(
-            "user_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False
-        ),
+        sa.Column("user_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("role", sa.String(), nullable=False),
         sa.Column("content", sa.Text(), nullable=False),
         sa.Column(
@@ -273,9 +250,7 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_chat_messages")),
-        sa.UniqueConstraint(
-            "user_id", "id", name=op.f("uq_chat_messages_user_id_id")
-        ),
+        sa.UniqueConstraint("user_id", "id", name=op.f("uq_chat_messages_user_id_id")),
     )
     op.create_index(
         op.f("ix_chat_messages_conversation_id"),
@@ -304,9 +279,7 @@ def upgrade() -> None:
             sa.dialects.postgresql.UUID(as_uuid=True),
             nullable=False,
         ),
-        sa.Column(
-            "user_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False
-        ),
+        sa.Column("user_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),

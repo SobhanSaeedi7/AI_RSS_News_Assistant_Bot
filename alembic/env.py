@@ -14,11 +14,10 @@ from logging.config import fileConfig
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from alembic import context
-
 # Import the application's declarative Base so Alembic can inspect model metadata
 # for autogeneration and migration rendering.
-from ai_rss_news_assistant.db.base import Base  # noqa: E402
+from ai_rss_news_assistant.db.base import Base
+from alembic import context
 
 config = context.config
 
