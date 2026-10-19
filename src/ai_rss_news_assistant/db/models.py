@@ -106,6 +106,7 @@ class NewsItem(Base):
     feed_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     title: Mapped[str] = mapped_column(String, nullable=False)
     url: Mapped[str] = mapped_column(String, nullable=False)
+    normalized_url: Mapped[str] = mapped_column(String, nullable=False)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(
@@ -126,12 +127,16 @@ class NewsItem(Base):
             name="fk_news_items_user_feed",
             ondelete="CASCADE",
         ),
-        # A feed cannot contain the same article URL twice.
-        UniqueConstraint("feed_id", "url", name="uq_news_items_feed_id_url"),
+        # The same canonical article URL may only be stored once per user,
+        # regardless of which feed it arrives through.
+        UniqueConstraint(
+            "user_id", "normalized_url", name="uq_news_items_user_id_normalized_url"
+        ),
         # Composite candidate key so message_citations can reference
         # (user_id, news_item_id).
         UniqueConstraint("user_id", "id", name="uq_news_items_user_id_id"),
         Index("ix_news_items_user_id", "user_id"),
+        Index("ix_news_items_normalized_url", "normalized_url"),
         Index("ix_news_items_feed_id", "feed_id"),
         Index("ix_news_items_fetched_at", "fetched_at"),
     )

@@ -98,7 +98,7 @@ def test_news_items_unique_constraints() -> None:
         for uc in t.constraints
         if isinstance(uc, UniqueConstraint)
     ]
-    assert ["feed_id", "url"] in uniques
+    assert ["user_id", "normalized_url"] in uniques
     assert ["user_id", "id"] in uniques
 
 
