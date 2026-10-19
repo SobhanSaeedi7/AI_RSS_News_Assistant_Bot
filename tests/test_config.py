@@ -11,9 +11,25 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
+from pydantic_settings import SettingsConfigDict
 
 from ai_rss_news_assistant.config import Settings
 from ai_rss_news_assistant.main import main, worker
+
+
+@pytest.fixture(autouse=True)
+def _ignore_env_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Do not load values from the local .env file during tests.
+
+    Tests set environment variables explicitly via monkeypatch. A pre-existing
+    .env file (gitignored, not part of this repo) must not interfere.
+    """
+    monkeypatch.setattr(
+        Settings,
+        "model_config",
+        SettingsConfigDict(env_file=None, env_file_encoding="utf-8", extra="ignore"),
+    )
+
 
 _BOT_TOKEN = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 _DATABASE_URL = "postgresql+asyncpg://ai_rss_news:secret@db:5432/ai_rss_news"
