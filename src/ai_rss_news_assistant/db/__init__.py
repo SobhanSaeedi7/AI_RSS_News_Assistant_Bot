@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from .base import Base, Database, init_database, get_database
+from .base import Base, Database, get_database, init_database
 
-__all__ = ["Base", "Database", "init_database", "get_database"]
+__all__ = ["Base", "Database", "get_database", "init_database"]

@@ -10,7 +10,7 @@ in-memory or test databases without affecting the application instance.
 from __future__ import annotations
 
 import contextlib
-from typing import AsyncIterator, Optional
+from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -69,7 +69,7 @@ class Database:
 
 
 # Module-level application database instance.
-_db: Optional[Database] = None
+_db: Database | None = None
 
 
 def init_database(database_url: str) -> Database:
@@ -86,9 +86,7 @@ def init_database(database_url: str) -> Database:
 def get_database() -> Database:
     """Return the module-level database, raising if not initialized."""
     if _db is None:
-        raise RuntimeError(
-            "Database is not initialized. Call init_database() first."
-        )
+        raise RuntimeError("Database is not initialized. Call init_database() first.")
     return _db
 
 
