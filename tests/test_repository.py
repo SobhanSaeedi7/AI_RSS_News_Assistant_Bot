@@ -21,14 +21,20 @@ from sqlalchemy.ext.asyncio import (
 from ai_rss_news_assistant.db.base import Base
 from ai_rss_news_assistant.db.models import NewsDelivery, NewsItem, User, UserFeed
 from ai_rss_news_assistant.db.repository import (
+    create_delivery,
     create_feed,
+    create_news_item,
     create_user,
     deactivate_user,
     delete_feed,
+    get_delivery,
     get_feed,
+    get_news_item,
     get_user_by_id,
     get_user_by_telegram_id,
+    list_deliveries,
     list_feeds,
+    list_news_items,
     update_feed,
     update_user_settings,
 )
@@ -306,5 +312,283 @@ async def test_delete_feed_cascades_to_news_and_delivery() -> None:
             select(NewsDelivery).where(NewsDelivery.news_item_id == item.id)
         )
         assert deliveries.scalars().all() == []
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_create_news_item_for_owned_feed() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=1200)
+        feed = await _add_feed(session, user, url="https://example.com/feed.xml")
+
+        item = await create_news_item(
+            session,
+            user_id=user.id,
+            feed_id=feed.id,
+            url="https://Example.COM/article/1#section",
+            title="Example Article",
+        )
+
+        assert item is not None
+        assert item.user_id == user.id
+        assert item.feed_id == feed.id
+        assert item.title == "Example Article"
+        assert item.url == "https://Example.COM/article/1#section"
+        assert item.normalized_url == "https://example.com/article/1"
+        assert item.fetched_at is not None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_create_news_item_rejects_another_users_feed() -> None:
+    session = await _create_session()
+    try:
+        owner = await _add_user(session, telegram_user_id=1300)
+        other = await _add_user(session, telegram_user_id=1400)
+        feed = await _add_feed(session, owner, url="https://example.com/feed.xml")
+
+        item = await create_news_item(
+            session,
+            user_id=other.id,
+            feed_id=feed.id,
+            url="https://example.com/article/1",
+            title="Stolen Article",
+        )
+        assert item is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_create_news_item_rejects_nonexistent_feed() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=1500)
+
+        item = await create_news_item(
+            session,
+            user_id=user.id,
+            feed_id=uuid.uuid4(),
+            url="https://example.com/article/1",
+            title="Orphan Article",
+        )
+        assert item is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_get_news_item_requires_owner() -> None:
+    session = await _create_session()
+    try:
+        owner = await _add_user(session, telegram_user_id=1600)
+        other = await _add_user(session, telegram_user_id=1700)
+        feed = await _add_feed(session, owner, url="https://example.com/feed.xml")
+        item = await _add_news_item(
+            session, owner, feed, url="https://example.com/article/1"
+        )
+
+        fetched = await get_news_item(session, owner.id, item.id)
+        assert fetched is not None
+        assert fetched.id == item.id
+
+        not_fetched = await get_news_item(session, other.id, item.id)
+        assert not_fetched is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_get_news_item_not_found() -> None:
+    session = await _create_session()
+    try:
+        assert await get_news_item(session, uuid.uuid4(), uuid.uuid4()) is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_list_news_items_user_isolation() -> None:
+    session = await _create_session()
+    try:
+        user_a = await _add_user(session, telegram_user_id=1800)
+        user_b = await _add_user(session, telegram_user_id=1900)
+        feed_a = await _add_feed(session, user_a, url="https://a.example.com/feed.xml")
+        feed_b = await _add_feed(session, user_b, url="https://b.example.com/feed.xml")
+
+        await _add_news_item(session, user_a, feed_a, url="https://a.example.com/a1")
+        await _add_news_item(session, user_a, feed_a, url="https://a.example.com/a2")
+        await _add_news_item(session, user_b, feed_b, url="https://b.example.com/b1")
+
+        items_a = await list_news_items(session, user_a.id)
+        items_b = await list_news_items(session, user_b.id)
+
+        assert len(items_a) == 2
+        assert all(i.user_id == user_a.id for i in items_a)
+        assert len(items_b) == 1
+        assert items_b[0].user_id == user_b.id
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_same_normalized_url_different_users_allowed() -> None:
+    session = await _create_session()
+    try:
+        user_a = await _add_user(session, telegram_user_id=2000)
+        user_b = await _add_user(session, telegram_user_id=2100)
+        feed_a = await _add_feed(session, user_a, url="https://a.example.com/feed.xml")
+        feed_b = await _add_feed(session, user_b, url="https://b.example.com/feed.xml")
+
+        await _add_news_item(
+            session, user_a, feed_a, url="https://example.com/article/1"
+        )
+        await _add_news_item(
+            session, user_b, feed_b, url="https://example.com/article/1"
+        )
+
+        all_items = await session.execute(select(NewsItem))
+        items = all_items.scalars().all()
+        assert len(items) == 2
+        user_ids = {i.user_id for i in items}
+        assert user_ids == {user_a.id, user_b.id}
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_same_normalized_url_same_user_rejected() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=2200)
+        feed = await _add_feed(session, user)
+
+        await _add_news_item(session, user, feed, url="https://example.com/article/1")
+
+        with pytest.raises(IntegrityError):
+            await _add_news_item(
+                session, user, feed, url="https://EXAMPLE.COM/article/1"
+            )
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_create_delivery_for_own_news() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=2300)
+        feed = await _add_feed(session, user)
+        item = await _add_news_item(
+            session, user, feed, url="https://example.com/article/1"
+        )
+
+        delivery = await create_delivery(session, user.id, item.id)
+
+        assert delivery is not None
+        assert delivery.user_id == user.id
+        assert delivery.news_item_id == item.id
+        assert delivery.delivered_at is not None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_create_delivery_rejects_another_users_news() -> None:
+    session = await _create_session()
+    try:
+        owner = await _add_user(session, telegram_user_id=2400)
+        other = await _add_user(session, telegram_user_id=2500)
+        feed = await _add_feed(session, owner, url="https://example.com/feed.xml")
+        item = await _add_news_item(
+            session, owner, feed, url="https://example.com/article/1"
+        )
+
+        delivery = await create_delivery(session, other.id, item.id)
+        assert delivery is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_create_delivery_nonexistent_news() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=2600)
+
+        delivery = await create_delivery(session, user.id, uuid.uuid4())
+        assert delivery is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_get_delivery_requires_owner() -> None:
+    session = await _create_session()
+    try:
+        owner = await _add_user(session, telegram_user_id=2700)
+        other = await _add_user(session, telegram_user_id=2800)
+        feed = await _add_feed(session, owner, url="https://example.com/feed.xml")
+        item = await _add_news_item(
+            session, owner, feed, url="https://example.com/article/1"
+        )
+        delivery = await create_delivery(session, owner.id, item.id)
+
+        fetched = await get_delivery(session, owner.id, delivery.id)
+        assert fetched is not None
+        assert fetched.id == delivery.id
+
+        not_fetched = await get_delivery(session, other.id, delivery.id)
+        assert not_fetched is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_list_deliveries_user_isolation() -> None:
+    session = await _create_session()
+    try:
+        user_a = await _add_user(session, telegram_user_id=2900)
+        user_b = await _add_user(session, telegram_user_id=3000)
+        feed_a = await _add_feed(session, user_a, url="https://a.example.com/feed.xml")
+        feed_b = await _add_feed(session, user_b, url="https://b.example.com/feed.xml")
+        item_a = await _add_news_item(
+            session, user_a, feed_a, url="https://a.example.com/a1"
+        )
+        item_b = await _add_news_item(
+            session, user_b, feed_b, url="https://b.example.com/b1"
+        )
+
+        await create_delivery(session, user_a.id, item_a.id)
+        await create_delivery(session, user_b.id, item_b.id)
+
+        deliveries_a = await list_deliveries(session, user_a.id)
+        deliveries_b = await list_deliveries(session, user_b.id)
+
+        assert len(deliveries_a) == 1
+        assert all(d.user_id == user_a.id for d in deliveries_a)
+        assert len(deliveries_b) == 1
+        assert deliveries_b[0].user_id == user_b.id
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_duplicate_delivery_rejected() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=3100)
+        feed = await _add_feed(session, user)
+        item = await _add_news_item(
+            session, user, feed, url="https://example.com/article/1"
+        )
+
+        await create_delivery(session, user.id, item.id)
+
+        with pytest.raises(IntegrityError):
+            await create_delivery(session, user.id, item.id)
     finally:
         await _close_session(session)
