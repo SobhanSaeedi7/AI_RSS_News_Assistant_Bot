@@ -88,6 +88,47 @@ Key variables:
 The `bot` and `worker` services wait for `db` to become healthy before
 starting. PostgreSQL data persists in the named volume `db_data`.
 
+## Database migrations
+
+Schema changes are managed with [Alembic](https://alembic.sqlalchemy.org/). The
+migration scripts live in `alembic/versions/`. Migrations are **not** run
+automatically when the bot or worker starts; they must be applied explicitly
+against the `db` service so schema changes are reviewed and applied
+intentionally.
+
+### Prerequisites
+
+* Docker and Docker Compose installed.
+* A `.env` file (copied from `.env.example`) with `POSTGRES_PASSWORD` and
+  `BOT_TOKEN` set. `.env` is gitignored and excluded from the Docker build
+  context by `.dockerignore`.
+
+### Apply migrations
+
+```sh
+docker compose up migrate
+```
+
+This builds the image (if needed), waits for the `db` service to become
+healthy, then runs `alembic upgrade head` against it and exits. The
+`migrate` service uses `DATABASE_URL` composed from `POSTGRES_USER`,
+`POSTGRES_PASSWORD`, and `POSTGRES_DB`; no credentials are hard-coded or
+logged.
+
+Equivalent one-off form:
+
+```sh
+docker compose run --rm migrate
+```
+
+### Inspect the current revision
+
+```sh
+docker compose run --rm migrate current
+```
+
+This prints the latest applied migration revision (e.g. `0002_add_normalized_url`).
+
 ## Database decision: PostgreSQL
 
 PostgreSQL is selected as the persistent store because the bot and worker are
