@@ -45,6 +45,29 @@ services:
     command: ["worker"]
     restart: unless-stopped
 
+  # One-off migration service. Runs `alembic upgrade head` against the `db`
+  # service and exits; it is not restarted automatically. Use:
+  #   docker compose up migrate
+  # or:
+  #   docker compose run --rm migrate
+  # It overrides the image entrypoint to `alembic` so the command is passed
+  # straight to the Alembic CLI. DATABASE_URL is supplied from Compose
+  # environment substitution; credentials are never hard-coded or logged.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ai_rss_news}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:-ai_rss_news}
+    entrypoint: ["alembic"]
+    command: ["upgrade", "head"]
+    restart: "no"
+
 volumes:
   db_data:
     name: ai_rss_news_db_data
