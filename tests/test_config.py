@@ -9,6 +9,8 @@ Telegram, database, or LLM calls are made.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from pydantic import ValidationError
 from pydantic_settings import SettingsConfigDict
@@ -73,7 +75,12 @@ def test_main_requires_bot_token(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_worker_starts_without_bot_token(monkeypatch: pytest.MonkeyPatch) -> None:
     _database_env(monkeypatch)
     monkeypatch.delenv("BOT_TOKEN", raising=False)
-    worker()  # must not raise
+    with patch(
+        "ai_rss_news_assistant.main.NewsWorker.run",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        worker()  # must not raise
 
 
 def test_database_url_is_required(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -49,7 +49,7 @@ def worker() -> None:
     fetch_timeout = int(os.environ.get("FETCH_TIMEOUT_SECONDS", "30"))
 
     news_worker = NewsWorker(
-        db=db.engine,
+        engine=db.engine,
         poll_interval_seconds=poll_interval,
         fetch_full_text=fetch_full_text,
         fetch_timeout=fetch_timeout,
