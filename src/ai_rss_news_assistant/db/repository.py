@@ -223,6 +223,29 @@ async def list_news_items(
     return list(result.scalars().all())
 
 
+async def list_news_items_with_feed(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    limit: int = 5,
+) -> list[tuple[NewsItem, UserFeed]]:
+    """Return the user's latest news items paired with the feed they came from.
+
+    The join is scoped by ``user_id`` on both sides, so a news item can only
+    be paired with a feed owned by the same user.
+    """
+    result = await session.execute(
+        select(NewsItem, UserFeed)
+        .join(
+            UserFeed,
+            (UserFeed.id == NewsItem.feed_id) & (UserFeed.user_id == NewsItem.user_id),
+        )
+        .where(NewsItem.user_id == user_id)
+        .order_by(NewsItem.fetched_at.desc(), NewsItem.url)
+        .limit(limit)
+    )
+    return [(item, feed) for item, feed in result.all()]
+
+
 async def create_delivery(
     session: AsyncSession,
     user_id: uuid.UUID,

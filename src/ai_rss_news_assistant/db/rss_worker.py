@@ -90,7 +90,11 @@ class NewsWorker:
 
         for user in users:
             try:
-                async with self.session_factory() as user_session:
+                # begin() commits the user's ingested news when the block exits
+                # successfully, and rolls back everything for that user if any
+                # step raises. Repository functions only flush; without this
+                # commit the session close discarded every poll's results.
+                async with self.session_factory.begin() as user_session:
                     await ingest_feeds_for_user(user_session, user.id)
                     if self.fetch_full_text:
                         await self._fetch_missing_full_text(user_session, user.id)

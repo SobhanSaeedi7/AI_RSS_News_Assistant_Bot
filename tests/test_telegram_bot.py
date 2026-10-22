@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,12 +17,21 @@ from sqlalchemy.exc import IntegrityError
 from telegram import Update
 from telegram.ext import Application, ContextTypes
 
+from ai_rss_news_assistant.db.base import Base, Database
 from ai_rss_news_assistant.db.models import User, UserFeed
+from ai_rss_news_assistant.db.repository import (
+    create_feed,
+    create_news_item,
+    create_user,
+)
 from ai_rss_news_assistant.main import (
+    NEWS_EMPTY,
+    NEWS_MAX_MESSAGE_LENGTH,
     add_feed_command,
     delete_feed_command,
     help_command,
     list_feeds_command,
+    news_command,
     start_command,
 )
 
@@ -675,3 +685,189 @@ def test_main_disposes_db_exactly_once_on_normal_shutdown() -> None:
         ]
         assert len(dispose_coroutines) == 1
         mock_loop.close.assert_called_once()
+
+
+# --- /news command (real database) ---
+
+
+async def _make_real_db(tmp_path) -> Database:
+    """Create a file-backed SQLite database with the application schema."""
+    db = Database(f"sqlite+aiosqlite:///{(tmp_path / 'telegram-news.db').as_posix()}")
+    async with db.engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    return db
+
+
+async def _seed_news(
+    db: Database,
+    telegram_user_id: int,
+    entries: list[dict],
+    feed_title: str = "Example Feed",
+) -> uuid.UUID:
+    """Create a user, a feed, and the supplied news entries."""
+    async with db.session() as session:
+        user = await create_user(session, telegram_user_id)
+        feed = await create_feed(
+            session,
+            user.id,
+            f"https://example.com/{telegram_user_id}/feed.xml",
+            title=feed_title,
+        )
+        for index, entry in enumerate(entries):
+            await create_news_item(
+                session=session,
+                user_id=user.id,
+                feed_id=feed.id,
+                url=entry.get("url", f"https://example.com/{telegram_user_id}/{index}"),
+                title=entry["title"],
+                published_at=entry.get("published_at"),
+                fetched_at=entry.get(
+                    "fetched_at",
+                    datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=index),
+                ),
+            )
+        return user.id
+
+
+@pytest.mark.anyio
+async def test_news_command_returns_latest_five_own_items(tmp_path) -> None:
+    """Only the five most recent articles are sent, in newest-first order."""
+    db = await _make_real_db(tmp_path)
+    try:
+        entries = [
+            {
+                "title": f"Article {index}",
+                "published_at": datetime(2026, 1, index, tzinfo=UTC),
+            }
+            for index in range(1, 7)
+        ]
+        await _seed_news(db, _TEST_TELEGRAM_USER_ID, entries)
+
+        update = _make_update()
+        context = _make_context(db)
+        await news_command(update, context)
+
+        calls = update.effective_message.reply_text.await_args_list
+        assert len(calls) == 1
+        text = calls[0].args[0]
+        assert calls[0].kwargs["parse_mode"] == "HTML"
+        assert "Article 6" in text
+        assert "Article 2" in text
+        assert "Article 1" not in text
+        assert text.count("لینک:") == 5
+        assert "منبع: Example Feed" in text
+        assert "تاریخ انتشار: 2026-01-06" in text
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_news_command_empty_state(tmp_path) -> None:
+    """A user without stored news gets the friendly Persian message."""
+    db = await _make_real_db(tmp_path)
+    try:
+        update = _make_update()
+        context = _make_context(db)
+        await news_command(update, context)
+
+        update.effective_message.reply_text.assert_awaited_once_with(NEWS_EMPTY)
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_news_command_does_not_leak_other_users_news(tmp_path) -> None:
+    """User A only receives articles belonging to user A."""
+    db = await _make_real_db(tmp_path)
+    try:
+        await _seed_news(
+            db,
+            _TEST_TELEGRAM_USER_ID,
+            [{"title": "A private article"}],
+            feed_title="A Feed",
+        )
+        await _seed_news(
+            db,
+            987654321,
+            [{"title": "B private article"}],
+            feed_title="B Feed",
+        )
+
+        update = _make_update()
+        context = _make_context(db)
+        await news_command(update, context)
+
+        calls = update.effective_message.reply_text.await_args_list
+        assert len(calls) == 1
+        text = calls[0].args[0]
+        assert "A private article" in text
+        assert "منبع: A Feed" in text
+        assert "B private article" not in text
+        assert "B Feed" not in text
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_news_command_escapes_untrusted_feed_text(tmp_path) -> None:
+    """Feed titles and feed names are HTML-escaped before sending."""
+    db = await _make_real_db(tmp_path)
+    try:
+        await _seed_news(
+            db,
+            _TEST_TELEGRAM_USER_ID,
+            [
+                {
+                    "title": "<b>Breaking</b> & <script>alert(1)</script>",
+                }
+            ],
+            feed_title='<i>Feed "x"</i>',
+        )
+
+        update = _make_update()
+        context = _make_context(db)
+        await news_command(update, context)
+
+        text = update.effective_message.reply_text.await_args.args[0]
+        assert (
+            "&lt;b&gt;Breaking&lt;/b&gt; &amp; &lt;script&gt;alert(1)&lt;/script&gt;"
+            in text
+        )
+        assert "&lt;i&gt;Feed &quot;x&quot;&lt;/i&gt;" not in text
+        assert '&lt;i&gt;Feed "x"&lt;/i&gt;' in text
+        assert "<script>" not in text
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_news_command_handles_missing_dates_and_long_output(tmp_path) -> None:
+    """Missing dates are omitted and long articles are split under the limit."""
+    db = await _make_real_db(tmp_path)
+    try:
+        long_title = "T" * 2000
+        long_suffix = "a" * 2000
+        entries = [
+            {
+                "title": long_title,
+                "url": f"https://example.com/{index}/{long_suffix}",
+                "published_at": None,
+            }
+            for index in range(5)
+        ]
+        await _seed_news(db, _TEST_TELEGRAM_USER_ID, entries)
+
+        update = _make_update()
+        context = _make_context(db)
+        await news_command(update, context)
+
+        calls = update.effective_message.reply_text.await_args_list
+        assert len(calls) >= 2
+        texts = [call.args[0] for call in calls]
+        assert all(len(text) <= NEWS_MAX_MESSAGE_LENGTH for text in texts)
+        combined = "".join(texts)
+        assert "تاریخ انتشار" not in combined
+        assert "…" in combined
+        assert all(call.kwargs["parse_mode"] == "HTML" for call in calls)
+    finally:
+        await db.dispose()
