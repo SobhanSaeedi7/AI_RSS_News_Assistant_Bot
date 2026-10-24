@@ -22,3 +22,10 @@ def setup_logging(level: str = "INFO") -> None:
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         force=True,
     )
+
+    # httpx logs every outbound request URL at INFO, and Telegram API URLs
+    # embed the bot token (https://api.telegram.org/bot<token>/<method>).
+    # Keep this third-party logger at WARNING so credentials never reach the
+    # logs; application loggers, warnings, errors, and tracebacks are
+    # unaffected.
+    logging.getLogger("httpx").setLevel(logging.WARNING)

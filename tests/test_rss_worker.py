@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -510,3 +510,203 @@ async def test_worker_stop_gracefully() -> None:
         assert db_items[0].title == "Article"
     finally:
         await _close_session(session)
+
+
+# --- Transaction persistence (file-backed SQLite) ---
+#
+# The in-memory engine above shares one connection between sessions, so it
+# cannot detect a missing COMMIT. These tests use a file-backed database and
+# read through a separate connection after the worker's session closes.
+
+
+def _file_database_url(db_path) -> str:
+    return f"sqlite+aiosqlite:///{db_path.as_posix()}"
+
+
+async def _create_file_engine(db_url: str):
+    engine = create_async_engine(db_url)
+
+    # pysqlite's implicit transaction handling makes RELEASE SAVEPOINT commit
+    # the surrounding transaction, so a later ROLLBACK removes nothing. Emit
+    # an explicit BEGIN (SQLAlchemy's documented SQLite recipe) so savepoints
+    # and rollbacks behave like PostgreSQL, which is what production uses.
+    @event.listens_for(engine.sync_engine, "connect")
+    def _sqlite_disable_implicit_transactions(dbapi_connection, _record) -> None:
+        dbapi_connection.isolation_level = None
+
+    @event.listens_for(engine.sync_engine, "begin")
+    def _sqlite_explicit_begin(connection) -> None:
+        connection.exec_driver_sql("BEGIN")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    return engine
+
+
+async def _read_titles(db_url: str, user_id=None) -> list[str]:
+    """Read news titles through a brand-new engine/connection."""
+    engine = create_async_engine(db_url)
+    try:
+        factory = async_sessionmaker(
+            engine, class_=AsyncSession, expire_on_commit=False
+        )
+        async with factory() as session:
+            query = select(NewsItem.title).order_by(NewsItem.title)
+            if user_id is not None:
+                query = query.where(NewsItem.user_id == user_id)
+            result = await session.execute(query)
+            return list(result.scalars().all())
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_worker_commits_ingested_news_after_session_closes(tmp_path) -> None:
+    """Ingested news survives the per-user session closing and reconnecting."""
+    db_url = _file_database_url(tmp_path / "worker_commit.db")
+    engine = await _create_file_engine(db_url)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with factory() as seed:
+            user = await _add_user(seed, telegram_user_id=811)
+            await _add_feed(seed, user, url="https://example.com/feed.xml")
+            await seed.commit()
+            user_id = user.id
+
+        parsed = _make_parsed_feed(
+            [_make_entry(url="https://example.com/article/1", title="Persisted")]
+        )
+        with (
+            patch(
+                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                return_value=_make_feed_response(),
+            ),
+            patch(
+                "ai_rss_news_assistant.db.rss_ingestion.feedparser.parse",
+                return_value=parsed,
+            ),
+        ):
+            worker = NewsWorker(
+                engine=engine,
+                poll_interval_seconds=1,
+                fetch_full_text=False,
+            )
+            await worker._poll_once()
+    finally:
+        await engine.dispose()
+
+    assert await _read_titles(db_url, user_id) == ["Persisted"]
+
+
+@pytest.mark.anyio
+async def test_worker_rolls_back_partial_ingestion_when_user_fails(
+    tmp_path, caplog
+) -> None:
+    """A failure after ingestion rolls back that user's partial results."""
+    db_url = _file_database_url(tmp_path / "worker_rollback.db")
+    engine = await _create_file_engine(db_url)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with factory() as seed:
+            user = await _add_user(seed, telegram_user_id=812)
+            await _add_feed(seed, user, url="https://example.com/feed.xml")
+            await seed.commit()
+            user_id = user.id
+
+        real_ingest = ingest_feeds_for_user
+
+        async def fail_after_ingest(session, target_user_id):
+            await real_ingest(session, target_user_id)
+            raise RuntimeError("simulated failure after ingestion")
+
+        parsed = _make_parsed_feed(
+            [_make_entry(url="https://example.com/article/1", title="Discarded")]
+        )
+        with (
+            patch(
+                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                return_value=_make_feed_response(),
+            ),
+            patch(
+                "ai_rss_news_assistant.db.rss_ingestion.feedparser.parse",
+                return_value=parsed,
+            ),
+            patch(
+                "ai_rss_news_assistant.db.rss_worker.ingest_feeds_for_user",
+                side_effect=fail_after_ingest,
+            ),
+        ):
+            worker = NewsWorker(
+                engine=engine,
+                poll_interval_seconds=1,
+                fetch_full_text=False,
+            )
+            await worker._poll_once()
+    finally:
+        await engine.dispose()
+
+    assert await _read_titles(db_url, user_id) == []
+    assert "Worker error" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_worker_failure_for_one_user_does_not_block_another(tmp_path) -> None:
+    """One user's failure neither blocks nor rolls back another user's news."""
+    db_url = _file_database_url(tmp_path / "worker_isolation.db")
+    engine = await _create_file_engine(db_url)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with factory() as seed:
+            user_a = await _add_user(seed, telegram_user_id=813)
+            user_b = await _add_user(seed, telegram_user_id=814)
+            await _add_feed(seed, user_a, url="https://a.example.com/feed.xml")
+            await _add_feed(seed, user_b, url="https://b.example.com/feed.xml")
+            await seed.commit()
+            user_a_id, user_b_id = user_a.id, user_b.id
+
+        real_ingest = ingest_feeds_for_user
+
+        async def failing_for_a(session, target_user_id):
+            stats = await real_ingest(session, target_user_id)
+            if target_user_id == user_a_id:
+                raise RuntimeError("simulated failure for user A")
+            return stats
+
+        entry_a = _make_entry(url="https://a.example.com/article/1", title="Article A")
+        entry_b = _make_entry(url="https://b.example.com/article/1", title="Article B")
+
+        def urlopen_side_effect(req, timeout=None):
+            if "a.example.com" in req.full_url:
+                return _make_feed_response(b"feed_a")
+            return _make_feed_response(b"feed_b")
+
+        def feedparser_side_effect(content: bytes) -> dict:
+            if content == b"feed_a":
+                return _make_parsed_feed([entry_a])
+            return _make_parsed_feed([entry_b])
+
+        with (
+            patch(
+                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                side_effect=urlopen_side_effect,
+            ),
+            patch(
+                "ai_rss_news_assistant.db.rss_ingestion.feedparser.parse",
+                side_effect=feedparser_side_effect,
+            ),
+            patch(
+                "ai_rss_news_assistant.db.rss_worker.ingest_feeds_for_user",
+                side_effect=failing_for_a,
+            ),
+        ):
+            worker = NewsWorker(
+                engine=engine,
+                poll_interval_seconds=1,
+                fetch_full_text=False,
+            )
+            await worker._poll_once()
+    finally:
+        await engine.dispose()
+
+    assert await _read_titles(db_url, user_a_id) == []
+    assert await _read_titles(db_url, user_b_id) == ["Article B"]

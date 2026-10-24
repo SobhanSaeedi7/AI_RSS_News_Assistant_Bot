@@ -8,6 +8,7 @@ are implemented here.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import signal
@@ -24,12 +25,14 @@ from telegram.ext import (
 
 from ai_rss_news_assistant.config import Settings
 from ai_rss_news_assistant.db.base import Database
+from ai_rss_news_assistant.db.models import NewsItem, UserFeed
 from ai_rss_news_assistant.db.repository import (
     create_feed,
     create_user,
     delete_feed,
     get_user_by_telegram_id,
     list_feeds,
+    list_news_items_with_feed,
 )
 from ai_rss_news_assistant.db.rss_worker import NewsWorker
 from ai_rss_news_assistant.db.url_normalization import normalize_url
@@ -44,7 +47,8 @@ WELCOME_MESSAGE = (
     "/help - نمایش راهنما\n"
     "/addfeed <url> - اضافه کردن فید RSS جدید\n"
     "/listfeeds - مشاهده فیدهای شما\n"
-    "/delfeed <id> - حذف یک فید"
+    "/delfeed <id> - حذف یک فید\n"
+    "/news - نمایش آخرین اخبار ذخیره‌شده"
 )
 
 HELP_MESSAGE = (
@@ -54,7 +58,8 @@ HELP_MESSAGE = (
     "/help - نمایش راهنما\n"
     "/addfeed <url> - اضافه کردن فید RSS جدید\n"
     "/listfeeds - مشاهده فیدهای شما\n"
-    "/delfeed <id> - حذف یک فید"
+    "/delfeed <id> - حذف یک فید\n"
+    "/news - نمایش آخرین اخبار ذخیره‌شده"
 )
 
 ADD_FEED_USAGE = (
@@ -96,6 +101,20 @@ DEL_FEED_SUCCESS = (
 DEL_FEED_NOT_FOUND = (
     "فیدی با شناسه {id} یافت نشد یا دسترسی به آن ندارید."
 )
+
+NEWS_LIMIT = 5
+# Telegram rejects messages longer than 4096 characters; leave room for the header.
+NEWS_MAX_MESSAGE_LENGTH = 4000
+NEWS_MAX_TITLE_LENGTH = 300
+NEWS_MAX_SOURCE_LENGTH = 100
+NEWS_MAX_URL_LENGTH = 1000
+
+NEWS_EMPTY = (
+    "هنوز خبری برای شما ذخیره نشده است.\n"
+    "با /addfeed یک فید اضافه کنید و کمی صبر کنید تا اخبار دریافت شوند."
+)
+
+NEWS_HEADER = "آخرین اخبار شما:\n\n"
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -235,6 +254,77 @@ async def delete_feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.effective_message.reply_text(DEL_FEED_NOT_FOUND.format(id=feed_id))
 
 
+def _truncate(value: str, limit: int) -> str:
+    """Trim untrusted text before escaping so entities are never cut in half."""
+    if len(value) <= limit:
+        return value
+    return value[: max(limit - 1, 0)].rstrip() + "…"
+
+
+def _feed_display_name(feed: UserFeed) -> str:
+    """Prefer the feed title, falling back to the feed URL's hostname."""
+    if feed.title:
+        return feed.title
+    return urlsplit(feed.url).hostname or feed.url
+
+
+def _format_news_item(index: int, item: NewsItem, feed: UserFeed) -> str:
+    """Format one stored article as an HTML-mode Telegram block."""
+    raw_title = item.title.strip() if item.title else ""
+    title = (
+        html.escape(_truncate(raw_title, NEWS_MAX_TITLE_LENGTH), quote=False)
+        or "(بدون عنوان)"
+    )
+    source = html.escape(
+        _truncate(_feed_display_name(feed), NEWS_MAX_SOURCE_LENGTH), quote=False
+    )
+    url = html.escape(_truncate(item.url, NEWS_MAX_URL_LENGTH), quote=False)
+
+    lines = [f"{index}. <b>{title}</b>", f"منبع: {source}"]
+    if item.published_at is not None:
+        lines.append(f"تاریخ انتشار: {item.published_at:%Y-%m-%d}")
+    lines.append(f"لینک: {url}")
+    return "\n".join(lines)
+
+
+def _build_news_messages(items: list[tuple[NewsItem, UserFeed]]) -> list[str]:
+    """Split formatted articles into Telegram-safe message chunks."""
+    messages: list[str] = []
+    current = NEWS_HEADER
+    for index, (item, feed) in enumerate(items, start=1):
+        block = _format_news_item(index, item, feed) + "\n\n"
+        if len(current) + len(block) > NEWS_MAX_MESSAGE_LENGTH:
+            messages.append(current.rstrip())
+            current = block
+        else:
+            current += block
+    messages.append(current.rstrip())
+    return messages
+
+
+async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /news: show the latest stored articles owned by this user."""
+    telegram_user = update.effective_user
+    if telegram_user is None or update.effective_message is None:
+        return
+
+    db: Database = context.application.bot_data["db"]
+    async with db.session() as session:
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        items = (
+            await list_news_items_with_feed(session, user.id, limit=NEWS_LIMIT)
+            if user is not None
+            else []
+        )
+
+    if not items:
+        await update.effective_message.reply_text(NEWS_EMPTY)
+        return
+
+    for message in _build_news_messages(items):
+        await update.effective_message.reply_text(message, parse_mode="HTML")
+
+
 async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log errors caused by Updates without leaking secrets."""
     logger.exception("Exception while handling an update: %s", context.error)
@@ -288,6 +378,7 @@ def main() -> None:
         application.add_handler(CommandHandler("addfeed", add_feed_command))
         application.add_handler(CommandHandler("listfeeds", list_feeds_command))
         application.add_handler(CommandHandler("delfeed", delete_feed_command))
+        application.add_handler(CommandHandler("news", news_command))
         application.add_error_handler(_error_handler)
 
         try:
