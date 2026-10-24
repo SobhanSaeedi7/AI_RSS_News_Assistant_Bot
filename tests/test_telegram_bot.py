@@ -23,6 +23,7 @@ from ai_rss_news_assistant.db.repository import (
     create_feed,
     create_news_item,
     create_user,
+    get_user_by_telegram_id,
 )
 from ai_rss_news_assistant.main import (
     NEWS_EMPTY,
@@ -702,7 +703,7 @@ async def _seed_news(
     db: Database,
     telegram_user_id: int,
     entries: list[dict],
-    feed_title: str = "Example Feed",
+    feed_title: str | None = "Example Feed",
 ) -> uuid.UUID:
     """Create a user, a feed, and the supplied news entries."""
     async with db.session() as session:
@@ -771,6 +772,55 @@ async def test_news_command_empty_state(tmp_path) -> None:
         await news_command(update, context)
 
         update.effective_message.reply_text.assert_awaited_once_with(NEWS_EMPTY)
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_news_command_existing_user_without_news(tmp_path) -> None:
+    """An existing account with no articles gets the Persian empty state."""
+    db = await _make_real_db(tmp_path)
+    try:
+        await _seed_news(db, _TEST_TELEGRAM_USER_ID, [])
+
+        # Precondition: the user record exists, so only the news is missing.
+        async with db.session() as session:
+            user = await get_user_by_telegram_id(session, _TEST_TELEGRAM_USER_ID)
+        assert user is not None
+
+        update = _make_update()
+        context = _make_context(db)
+        await news_command(update, context)
+
+        update.effective_message.reply_text.assert_awaited_once_with(NEWS_EMPTY)
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_news_command_falls_back_to_feed_hostname_without_title(tmp_path) -> None:
+    """A feed without a title is shown by hostname in well-formed HTML."""
+    db = await _make_real_db(tmp_path)
+    try:
+        await _seed_news(
+            db,
+            _TEST_TELEGRAM_USER_ID,
+            [{"title": "Fallback article"}],
+            feed_title=None,
+        )
+
+        update = _make_update()
+        context = _make_context(db)
+        await news_command(update, context)
+
+        calls = update.effective_message.reply_text.await_args_list
+        assert len(calls) == 1
+        text = calls[0].args[0]
+        assert calls[0].kwargs["parse_mode"] == "HTML"
+        assert "Fallback article" in text
+        assert "منبع: example.com" in text
+        assert "None" not in text
+        assert text.count("<b>") == text.count("</b>") == 1
     finally:
         await db.dispose()
 
