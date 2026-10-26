@@ -97,6 +97,24 @@ def test_database_url_must_be_postgres(monkeypatch: pytest.MonkeyPatch) -> None:
         Settings()
 
 
+def test_database_url_must_use_asyncpg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A synchronous or non-asyncpg URL would fail only at runtime."""
+    _full_env(monkeypatch)
+    monkeypatch.setenv("DATABASE_URL", "postgres://user:pass@db:5432/news")
+    with pytest.raises(ValidationError, match="asyncpg"):
+        Settings()
+
+
+def test_blank_bot_token_is_treated_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose passes an empty string when BOT_TOKEN is unset."""
+    _database_env(monkeypatch)
+    monkeypatch.setenv("BOT_TOKEN", "   ")
+    settings = Settings()
+    assert settings.bot_token is None
+
+
 def test_app_env_default_and_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     _full_env(monkeypatch)
 
@@ -115,5 +133,27 @@ def test_log_level_default_and_validation(monkeypatch: pytest.MonkeyPatch) -> No
     assert Settings().log_level == "DEBUG"
 
     monkeypatch.setenv("LOG_LEVEL", "NOT_A_LEVEL")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_llm_settings_have_safe_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LLM configuration is optional so delivery works without a provider."""
+    _database_env(monkeypatch)
+    for name in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LLM_TIMEOUT_SECONDS"):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = Settings()
+
+    assert settings.llm_api_key is None
+    assert settings.llm_base_url == "https://api.avalai.ir/v1"
+    assert settings.llm_model
+    assert settings.llm_timeout_seconds == 30
+
+
+def test_llm_timeout_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:
+    _full_env(monkeypatch)
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "0")
+
     with pytest.raises(ValidationError):
         Settings()
