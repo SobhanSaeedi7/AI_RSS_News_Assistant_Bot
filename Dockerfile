@@ -3,7 +3,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-ENV PYTHONDONTWRITEBYTECODE=1 \ 
+ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
@@ -27,6 +27,11 @@ COPY alembic/ ./alembic/
 
 # Install the project itself.
 RUN uv pip install --system --no-cache -e .
+
+# Run the application as an unprivileged user. The app only writes to
+# PostgreSQL, so it does not need ownership of the source tree.
+RUN useradd --create-home --uid 10001 appuser
+USER appuser
 
 # The same image runs the bot or worker depending on the Compose command.
 ENTRYPOINT ["python", "-m", "ai_rss_news_assistant"]

@@ -12,6 +12,8 @@ import logging
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_LLM_TIMEOUT_SECONDS = 30
+
 
 class Settings(BaseSettings):
     """Runtime configuration for the AI RSS News Assistant."""
@@ -23,7 +25,10 @@ class Settings(BaseSettings):
     # --- Telegram ---
     bot_token: str | None = Field(
         None,
-        description="Telegram bot token provided by @BotFather (required by the bot service, not by the worker)",
+        description=(
+            "Telegram bot token provided by @BotFather. Required by the bot "
+            "service and by the worker to send automatic delivery messages."
+        ),
     )
 
     # --- Application ---
@@ -41,6 +46,44 @@ class Settings(BaseSettings):
         ...,
         description="PostgreSQL connection URL shared by the bot and worker",
     )
+
+    # --- LLM ---
+    llm_api_key: str | None = Field(
+        None,
+        description=(
+            "API key for the OpenAI-compatible LLM provider. Optional; "
+            "delivery falls back to extractive summaries and /ask reports that "
+            "AI answers are disabled when unset."
+        ),
+    )
+    llm_base_url: str = Field(
+        "https://api.avalai.ir/v1",
+        description="Base URL of the OpenAI-compatible chat completions API",
+    )
+    llm_model: str = Field(
+        "gpt-6-luna",
+        description="Model used to summarize news items and answer /ask questions",
+    )
+    llm_timeout_seconds: int = Field(
+        DEFAULT_LLM_TIMEOUT_SECONDS,
+        description="Timeout in seconds for a single LLM request",
+    )
+
+    @field_validator("bot_token", mode="before")
+    @classmethod
+    def _normalize_bot_token(cls, value: object) -> object:
+        """Treat an empty or whitespace-only token as unset."""
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
+
+    @field_validator("llm_timeout_seconds")
+    @classmethod
+    def _validate_llm_timeout(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("llm_timeout_seconds must be a positive integer")
+        return value
 
     @field_validator("app_env")
     @classmethod
@@ -62,6 +105,8 @@ class Settings(BaseSettings):
     @field_validator("database_url")
     @classmethod
     def _validate_database_url(cls, value: str) -> str:
-        if not value.startswith(("postgresql+", "postgres://")):
-            raise ValueError("database_url must be a PostgreSQL URL")
+        if not value.startswith("postgresql+asyncpg://"):
+            raise ValueError(
+                "database_url must use the asyncpg driver (postgresql+asyncpg://)"
+            )
         return value

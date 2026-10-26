@@ -37,10 +37,15 @@ USER_AGENT = "AI-RSS-News-Assistant/1.0"
 _PRIVATE_NETWORKS = [
     ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("100.64.0.0/10"),  # RFC 6598 carrier-grade NAT
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("169.254.0.0/16"),
     ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.0.0.0/24"),  # IETF protocol assignments
     ipaddress.ip_network("192.0.2.0/24"),
+    ipaddress.ip_network("192.88.99.0/24"),  # deprecated 6to4 relay anycast
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("198.18.0.0/15"),  # benchmarking
     ipaddress.ip_network("198.51.100.0/24"),
     ipaddress.ip_network("203.0.113.0/24"),
     ipaddress.ip_network("224.0.0.0/4"),
@@ -49,6 +54,7 @@ _PRIVATE_NETWORKS = [
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("::/128"),
     ipaddress.ip_network("::ffff:0:0/96"),
+    ipaddress.ip_network("2001:db8::/32"),
     ipaddress.ip_network("fe80::/10"),
     ipaddress.ip_network("fc00::/7"),
     ipaddress.ip_network("ff00::/8"),
@@ -100,21 +106,51 @@ def _validate_url(url: str) -> None:
     hostname = parts.hostname
     if not hostname:
         raise ValueError("URL must have a hostname")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("URLs with embedded credentials are not allowed")
 
     if _is_blocked_host(hostname):
         raise ValueError(f"Access to {hostname} is not allowed")
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Validate each redirect target before urllib follows it.
+
+    ``urlopen`` follows redirects internally, so checking only the final URL
+    after the response arrives is too late: the request to the redirect target
+    has already been made. This handler rejects blocked targets first.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open_url(request: urllib.request.Request, timeout: int = REQUEST_TIMEOUT_SECONDS):
+    """Open a URL using an opener that validates redirects before following."""
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
+    return opener.open(request, timeout=timeout)
+
+
+def _safe_url_for_log(url: str) -> str:
+    """Return only the hostname so credentials never reach the logs."""
+    try:
+        hostname = urllib.request.urlsplit(url).hostname
+    except ValueError:
+        return "<invalid-url>"
+    return hostname or "<invalid-url>"
 
 
 def _fetch_feed_content(url: str, timeout: int = REQUEST_TIMEOUT_SECONDS) -> bytes:
     """Fetch RSS/Atom feed content from a URL with a timeout.
 
     Uses a custom User-Agent so feed publishers can identify our crawler.
-    Validates scheme and host before fetching, re-validates after redirects,
-    and caps response size at MAX_RESPONSE_BYTES.
+    Validates scheme and host before fetching, validates redirect targets
+    before following them, and caps response size at MAX_RESPONSE_BYTES.
     """
     _validate_url(url)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with _open_url(request, timeout=timeout) as response:
         # Re-validate after redirects
         final_url = response.geturl()
         if final_url != url:
@@ -201,7 +237,11 @@ async def ingest_feeds_for_user(
                 if extracted is None:
                     continue
 
-                normalized_url = normalize_url(extracted["url"])
+                try:
+                    normalized_url = normalize_url(extracted["url"])
+                except ValueError:
+                    # A malformed article URL must not stop the rest of the feed.
+                    continue
 
                 # Skip duplicates for this user
                 existing = await session.execute(
@@ -234,7 +274,7 @@ async def ingest_feeds_for_user(
                     continue
 
         except Exception:
-            logger.exception("Failed to process feed %s", feed.url)
+            logger.exception("Failed to process feed %s", _safe_url_for_log(feed.url))
             stats["errors"].append(
                 {
                     "feed_id": str(feed.id),

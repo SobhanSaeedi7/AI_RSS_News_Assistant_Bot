@@ -22,8 +22,10 @@ from ai_rss_news_assistant.db.html_text_extractor import html_to_text
 from ai_rss_news_assistant.db.models import NewsItem, User, UserFeed
 from ai_rss_news_assistant.db.rss_ingestion import (
     _fetch_feed_content,
+    _safe_url_for_log,
     ingest_feeds_for_user,
 )
+from ai_rss_news_assistant.delivery import DeliveryRunner
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,7 @@ class NewsWorker:
         poll_interval_seconds: int = 300,
         fetch_full_text: bool = True,
         fetch_timeout: int = 30,
+        delivery_service: DeliveryRunner | None = None,
     ) -> None:
         if poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be a positive integer")
@@ -56,6 +59,7 @@ class NewsWorker:
         self.poll_interval_seconds = poll_interval_seconds
         self.fetch_full_text = fetch_full_text
         self.fetch_timeout = fetch_timeout
+        self.delivery_service = delivery_service
         self._running = False
         self._lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
@@ -102,6 +106,14 @@ class NewsWorker:
                 logger.exception("Worker error for user %s", user.id)
                 continue
 
+            # Delivery runs in its own sessions after ingestion commits, so a
+            # Telegram or LLM failure can never roll back stored news.
+            if self.delivery_service is not None:
+                try:
+                    await self.delivery_service.deliver_for_user(user.id)
+                except Exception:
+                    logger.exception("Delivery error for user %s", user.id)
+
     async def _get_users_with_active_feeds(self, session: AsyncSession) -> list[User]:
         """Return users who have at least one active feed."""
         result = await session.execute(
@@ -147,7 +159,7 @@ class NewsWorker:
                 _fetch_feed_content, url, self.fetch_timeout
             )
         except Exception:  # noqa: BLE001 - catch-all for transient fetch failures
-            logger.debug("Failed to fetch %s", url)
+            logger.debug("Failed to fetch full text from %s", _safe_url_for_log(url))
             return None
 
         return html_to_text(content.decode("utf-8", errors="replace"))

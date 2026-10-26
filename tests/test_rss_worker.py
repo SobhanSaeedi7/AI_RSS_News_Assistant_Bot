@@ -136,7 +136,7 @@ async def test_ingest_feeds_for_user_creates_news_items() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 return_value=_make_feed_response(),
             ),
             patch(
@@ -181,7 +181,7 @@ async def test_ingest_feeds_skips_inactive_feeds() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 return_value=_make_feed_response([]),
             ),
             patch(
@@ -227,7 +227,7 @@ async def test_worker_polls_and_processes_feeds() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 side_effect=urlopen_side_effect,
             ),
             patch(
@@ -284,7 +284,7 @@ async def test_ingest_feeds_isolates_user_failures() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 side_effect=urlopen_side_effect,
             ),
             patch(
@@ -368,7 +368,7 @@ async def test_ingest_feeds_request_failure_isolated() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 side_effect=urlopen_side_effect,
             ),
             patch(
@@ -487,7 +487,7 @@ async def test_worker_stop_gracefully() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 return_value=_make_feed_response([]),
             ),
             patch(
@@ -578,7 +578,7 @@ async def test_worker_commits_ingested_news_after_session_closes(tmp_path) -> No
         )
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 return_value=_make_feed_response(),
             ),
             patch(
@@ -624,7 +624,7 @@ async def test_worker_rolls_back_partial_ingestion_when_user_fails(
         )
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 return_value=_make_feed_response(),
             ),
             patch(
@@ -687,7 +687,7 @@ async def test_worker_failure_for_one_user_does_not_block_another(tmp_path) -> N
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 side_effect=urlopen_side_effect,
             ),
             patch(

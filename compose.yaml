@@ -23,11 +23,18 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       APP_ENV: ${APP_ENV:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ai_rss_news}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:-ai_rss_news}
       BOT_TOKEN: ${BOT_TOKEN:?BOT_TOKEN is required}
+      # Optional: without an API key /ask reports that AI answers are disabled.
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.avalai.ir/v1}
+      LLM_MODEL: ${LLM_MODEL:-gpt-6-luna}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
     command: ["main"]
     restart: unless-stopped
 
@@ -38,10 +45,24 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       APP_ENV: ${APP_ENV:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ai_rss_news}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:-ai_rss_news}
+      # Optional: without a token the worker still ingests news but skips
+      # automatic delivery (a warning is logged at startup).
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      # Optional: without an API key delivery uses extractive summaries.
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.avalai.ir/v1}
+      LLM_MODEL: ${LLM_MODEL:-gpt-6-luna}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
+      # Worker polling and full-text-fetch tuning.
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-300}
+      FETCH_FULL_TEXT: ${FETCH_FULL_TEXT:-true}
+      FETCH_TIMEOUT_SECONDS: ${FETCH_TIMEOUT_SECONDS:-30}
     command: ["worker"]
     restart: unless-stopped
 

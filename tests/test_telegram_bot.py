@@ -15,8 +15,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy.exc import IntegrityError
 from telegram import Update
+from telegram.error import InvalidToken, TelegramError
 from telegram.ext import Application, ContextTypes
 
+from ai_rss_news_assistant.agent import AgentAnswer, AgentSource
 from ai_rss_news_assistant.db.base import Base, Database
 from ai_rss_news_assistant.db.models import User, UserFeed
 from ai_rss_news_assistant.db.repository import (
@@ -26,10 +28,22 @@ from ai_rss_news_assistant.db.repository import (
     get_user_by_telegram_id,
 )
 from ai_rss_news_assistant.main import (
+    AGENT_ERROR,
+    ASK_TOO_LONG,
+    ASK_USAGE,
+    DELIVERY_OFF,
+    DELIVERY_ON,
+    DELIVERY_STATUS_OFF,
+    DELIVERY_STATUS_ON,
+    DELIVERY_USAGE,
     NEWS_EMPTY,
     NEWS_MAX_MESSAGE_LENGTH,
+    _feed_display_name,
     add_feed_command,
+    ask_command,
+    build_ask_messages,
     delete_feed_command,
+    delivery_command,
     help_command,
     list_feeds_command,
     news_command,
@@ -58,10 +72,12 @@ def _make_update(telegram_user_id: int = _TEST_TELEGRAM_USER_ID) -> MagicMock:
     return update
 
 
-def _make_context(db: MagicMock, args: list | None = None) -> MagicMock:
+def _make_context(db: MagicMock, args: list | None = None, agent=None) -> MagicMock:
     """Create a mock ContextTypes.DEFAULT_TYPE with application.bot_data."""
     application = MagicMock(spec=Application)
     application.bot_data = {"db": db}
+    if agent is not None:
+        application.bot_data["agent"] = agent
     context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
     context.application = application
     context.args = args or []
@@ -201,10 +217,45 @@ async def test_add_feed_invalid_url() -> None:
 
 
 @pytest.mark.anyio
+async def test_add_feed_malformed_ipv6_url() -> None:
+    """Malformed IPv6 URLs are rejected before DB or network work."""
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=["http://[::1"])
+
+    with patch(
+        "ai_rss_news_assistant.main.get_user_by_telegram_id"
+    ) as mock_get_user, patch(
+        "ai_rss_news_assistant.main.normalize_url"
+    ) as mock_normalize:
+        await add_feed_command(update, context)
+
+    mock_get_user.assert_not_called()
+    mock_normalize.assert_not_called()
+    update.effective_message.reply_text.assert_called_once()
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "نامعتبر" in text
+
+
+@pytest.mark.anyio
 async def test_add_feed_missing_hostname() -> None:
     """Test /addfeed with URL missing hostname shows error."""
     update = _make_update()
     context = _make_context(AsyncMock(), args=["https://"])
+
+    await add_feed_command(update, context)
+
+    update.effective_message.reply_text.assert_called_once()
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "نامعتبر" in text
+
+
+@pytest.mark.anyio
+async def test_add_feed_rejects_embedded_credentials() -> None:
+    """Credentials in a feed URL must not be stored or logged."""
+    update = _make_update()
+    context = _make_context(
+        AsyncMock(), args=["https://user:password@example.com/feed.xml"]
+    )
 
     await add_feed_command(update, context)
 
@@ -481,6 +532,34 @@ async def test_list_feeds_with_feeds() -> None:
 
 
 @pytest.mark.anyio
+async def test_list_feeds_splits_long_output() -> None:
+    """A user with many/long feeds does not get one over-limit message."""
+    update = _make_update()
+    context = _make_context(AsyncMock())
+
+    _mock_db_session(context.application.bot_data["db"])
+
+    feed = MagicMock(spec=UserFeed)
+    feed.id = uuid.UUID("00000000-0000-0000-0000-000000000100")
+    feed.title = "T" * 2000
+    feed.url = "https://example.com/" + "a" * 2000
+    feed.active = True
+
+    with patch(
+        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        return_value=MagicMock(spec=User),
+    ), patch(
+        "ai_rss_news_assistant.main.list_feeds",
+        return_value=[feed, feed, feed],
+    ):
+        await list_feeds_command(update, context)
+
+    assert update.effective_message.reply_text.call_count > 1
+    for call in update.effective_message.reply_text.call_args_list:
+        assert len(call.args[0]) <= 4000
+
+
+@pytest.mark.anyio
 async def test_delete_feed_success() -> None:
     """Test /delfeed successfully deletes an owned feed."""
     feed_id = uuid.UUID("00000000-0000-0000-0000-000000000100")
@@ -688,6 +767,57 @@ def test_main_disposes_db_exactly_once_on_normal_shutdown() -> None:
         mock_loop.close.assert_called_once()
 
 
+def test_main_handles_invalid_token_without_leaking_token(caplog) -> None:
+    """InvalidToken is logged safely and the database is still disposed."""
+    mock_db = MagicMock()
+    mock_db.dispose = MagicMock(return_value=None)
+    mock_loop = MagicMock()
+    mock_application = MagicMock()
+    mock_application.initialize.return_value = None
+    mock_application.updater.running = False
+    mock_application.running = False
+
+    calls = 0
+
+    def run_until_complete(coro):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise InvalidToken(f"Invalid token: {_TEST_BOT_TOKEN}")
+
+    mock_loop.run_until_complete.side_effect = run_until_complete
+
+    with patch(
+        "ai_rss_news_assistant.main.Database", return_value=mock_db
+    ), patch(
+        "ai_rss_news_assistant.main.ApplicationBuilder"
+    ) as mock_builder, patch(
+        "ai_rss_news_assistant.main.setup_logging"
+    ), patch(
+        "ai_rss_news_assistant.main.asyncio.new_event_loop",
+        return_value=mock_loop,
+    ), patch(
+        "ai_rss_news_assistant.main.asyncio.set_event_loop"
+    ), patch.dict(
+        "os.environ",
+        {"BOT_TOKEN": _TEST_BOT_TOKEN, "DATABASE_URL": _TEST_DATABASE_URL},
+        clear=True,
+    ), caplog.at_level(
+        logging.ERROR, logger="ai_rss_news_assistant.main"
+    ):
+        mock_builder.return_value.token.return_value.build.return_value = (
+            mock_application
+        )
+
+        from ai_rss_news_assistant.main import main
+
+        main()
+
+    assert "rejected BOT_TOKEN" in caplog.text
+    assert _TEST_BOT_TOKEN not in caplog.text
+    mock_loop.close.assert_called_once()
+
+
 # --- /news command (real database) ---
 
 
@@ -825,6 +955,13 @@ async def test_news_command_falls_back_to_feed_hostname_without_title(tmp_path) 
         await db.dispose()
 
 
+def test_feed_display_name_falls_back_for_malformed_feed_url() -> None:
+    """A malformed stored feed URL is shown raw instead of raising."""
+    feed = UserFeed(user_id=uuid.uuid4(), url="http://[::1", title=None)
+
+    assert _feed_display_name(feed) == "http://[::1"
+
+
 @pytest.mark.anyio
 async def test_news_command_does_not_leak_other_users_news(tmp_path) -> None:
     """User A only receives articles belonging to user A."""
@@ -921,3 +1058,305 @@ async def test_news_command_handles_missing_dates_and_long_output(tmp_path) -> N
         assert all(call.kwargs["parse_mode"] == "HTML" for call in calls)
     finally:
         await db.dispose()
+
+
+# --- /delivery command (real database) ---
+
+
+async def _delivery_preference(db: Database, telegram_user_id: int) -> bool:
+    async with db.session() as session:
+        user = await get_user_by_telegram_id(session, telegram_user_id)
+        assert user is not None
+        return user.auto_delivery_enabled
+
+
+@pytest.mark.anyio
+async def test_delivery_command_defaults_to_on(tmp_path) -> None:
+    """A new user sees automatic delivery enabled by default."""
+    db = await _make_real_db(tmp_path)
+    try:
+        update = _make_update()
+        context = _make_context(db)
+
+        await delivery_command(update, context)
+
+        update.effective_message.reply_text.assert_awaited_once_with(DELIVERY_STATUS_ON)
+        assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is True
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_delivery_command_turns_off_and_persists(tmp_path) -> None:
+    """`/delivery off` is persisted and reflected on the next invocation."""
+    db = await _make_real_db(tmp_path)
+    try:
+        update = _make_update()
+        await delivery_command(update, _make_context(db, args=["off"]))
+
+        update.effective_message.reply_text.assert_awaited_once_with(DELIVERY_OFF)
+        assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is False
+
+        status_update = _make_update()
+        await delivery_command(status_update, _make_context(db))
+        status_update.effective_message.reply_text.assert_awaited_once_with(
+            DELIVERY_STATUS_OFF
+        )
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_delivery_command_turns_on(tmp_path) -> None:
+    """`/delivery on` re-enables delivery for a user who disabled it."""
+    db = await _make_real_db(tmp_path)
+    try:
+        async with db.session() as session:
+            await create_user(
+                session, _TEST_TELEGRAM_USER_ID, auto_delivery_enabled=False
+            )
+
+        update = _make_update()
+        await delivery_command(update, _make_context(db, args=["ON"]))
+
+        update.effective_message.reply_text.assert_awaited_once_with(DELIVERY_ON)
+        assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is True
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_delivery_command_rejects_invalid_argument(tmp_path) -> None:
+    """An unknown argument shows usage and leaves the preference untouched."""
+    db = await _make_real_db(tmp_path)
+    try:
+        async with db.session() as session:
+            await create_user(session, _TEST_TELEGRAM_USER_ID)
+
+        update = _make_update()
+        await delivery_command(update, _make_context(db, args=["maybe"]))
+
+        update.effective_message.reply_text.assert_awaited_once_with(DELIVERY_USAGE)
+        assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is True
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_delivery_preference_is_per_user(tmp_path) -> None:
+    """Disabling delivery for one user does not affect another user."""
+    db = await _make_real_db(tmp_path)
+    try:
+        other_telegram_id = _TEST_TELEGRAM_USER_ID + 1
+        async with db.session() as session:
+            await create_user(session, other_telegram_id)
+
+        await delivery_command(_make_update(), _make_context(db, args=["off"]))
+
+        assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is False
+        assert await _delivery_preference(db, other_telegram_id) is True
+    finally:
+        await db.dispose()
+
+
+# --- /ask command ---
+
+
+class _FakeAgent:
+    """Stand-in for NewsAgent that records calls and returns a canned answer."""
+
+    def __init__(self, answer: AgentAnswer | None = None, error=None) -> None:
+        self.calls: list[tuple] = []
+        self._answer = answer
+        self._error = error
+
+    async def answer(self, user_id, question: str) -> AgentAnswer:
+        self.calls.append((user_id, question))
+        if self._error is not None:
+            raise self._error
+        return self._answer
+
+
+def _grounded_answer(
+    text: str = "پاسخ آزمایشی [1]",
+    url: str = "https://example.com/ai",
+) -> AgentAnswer:
+    return AgentAnswer(
+        text=text,
+        sources=[AgentSource(title="هوش مصنوعی در ایران", url=url)],
+        grounded=True,
+    )
+
+
+@pytest.mark.anyio
+async def test_ask_command_requires_a_question() -> None:
+    agent = _FakeAgent(_grounded_answer())
+    update = _make_update()
+
+    await ask_command(update, _make_context(AsyncMock(), agent=agent))
+
+    update.effective_message.reply_text.assert_awaited_once_with(ASK_USAGE)
+    assert agent.calls == []
+
+
+@pytest.mark.anyio
+async def test_ask_command_rejects_long_question() -> None:
+    agent = _FakeAgent(_grounded_answer())
+    update = _make_update()
+
+    await ask_command(
+        update,
+        _make_context(AsyncMock(), args=["x" * 501], agent=agent),
+    )
+
+    update.effective_message.reply_text.assert_awaited_once_with(ASK_TOO_LONG)
+    assert agent.calls == []
+
+
+@pytest.mark.anyio
+async def test_ask_command_renders_answer_and_sources(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        agent = _FakeAgent(_grounded_answer())
+        update = _make_update()
+
+        await ask_command(
+            update,
+            _make_context(db, args=["خبرهای", "فناوری"], agent=agent),
+        )
+
+        calls = update.effective_message.reply_text.await_args_list
+        assert len(calls) == 1
+        text = calls[0].args[0]
+        assert "پاسخ آزمایشی" in text
+        assert '<a href="https://example.com/ai">' in text
+        assert "هوش مصنوعی در ایران" in text
+        assert calls[0].kwargs["parse_mode"] == "HTML"
+        assert calls[0].kwargs["disable_web_page_preview"] is True
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_ask_command_passes_internal_user_id(tmp_path) -> None:
+    """The handler resolves the Telegram user to its internal id for retrieval."""
+    db = await _make_real_db(tmp_path)
+    try:
+        async with db.session() as session:
+            user = await create_user(session, _TEST_TELEGRAM_USER_ID)
+            expected_id = user.id
+
+        agent = _FakeAgent(_grounded_answer())
+        update = _make_update()
+
+        await ask_command(update, _make_context(db, args=["سؤال"], agent=agent))
+
+        assert agent.calls == [(expected_id, "سؤال")]
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_ask_command_splits_long_answers(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        agent = _FakeAgent(AgentAnswer(text="کلمه " * 2000))
+        update = _make_update()
+
+        await ask_command(update, _make_context(db, args=["سؤال"], agent=agent))
+
+        calls = update.effective_message.reply_text.await_args_list
+        assert len(calls) >= 2
+        assert all(len(call.args[0]) <= 4000 for call in calls)
+        assert all(call.kwargs["parse_mode"] == "HTML" for call in calls)
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_ask_command_handles_agent_failure(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        agent = _FakeAgent(error=RuntimeError("boom"))
+        update = _make_update()
+
+        await ask_command(update, _make_context(db, args=["سؤال"], agent=agent))
+
+        calls = update.effective_message.reply_text.await_args_list
+        assert len(calls) == 1
+        assert calls[0].args[0] == AGENT_ERROR
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_ask_command_survives_telegram_error(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        agent = _FakeAgent(_grounded_answer())
+        update = _make_update()
+        update.effective_message.reply_text.side_effect = TelegramError("boom")
+
+        await ask_command(update, _make_context(db, args=["سؤال"], agent=agent))
+
+        update.effective_message.reply_text.assert_awaited_once()
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_ask_command_escapes_html_in_answer(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        agent = _FakeAgent(AgentAnswer(text="<script>alert(1)</script> [1]"))
+        update = _make_update()
+
+        await ask_command(update, _make_context(db, args=["سؤال"], agent=agent))
+
+        text = update.effective_message.reply_text.await_args.args[0]
+        assert "&lt;script&gt;" in text
+        assert "<script>" not in text
+    finally:
+        await db.dispose()
+
+
+def test_build_ask_messages_omits_sources_when_not_grounded() -> None:
+    messages = build_ask_messages(AgentAnswer(text="اطلاعات کافی پیدا نشد."))
+
+    assert messages == ["اطلاعات کافی پیدا نشد."]
+
+
+def test_split_message_never_breaks_html_entities() -> None:
+    from ai_rss_news_assistant.main import _split_message
+
+    word = "&amp;" * 100
+    chunks = _split_message(word, 17)
+
+    assert "".join(chunks) == word
+    assert all(len(chunk) <= 17 for chunk in chunks)
+    assert all(len(chunk) % 5 == 0 for chunk in chunks)
+
+
+def test_build_ask_messages_does_not_link_unsafe_urls() -> None:
+    messages = build_ask_messages(
+        AgentAnswer(
+            text="پاسخ [1]",
+            sources=[AgentSource(title="<b>bad</b>", url="javascript:alert(1)")],
+            grounded=True,
+        )
+    )
+
+    assert "<a href=" not in messages[0]
+    assert "&lt;b&gt;bad&lt;/b&gt;" in messages[0]
+
+
+def test_build_ask_messages_escapes_source_url_attributes() -> None:
+    messages = build_ask_messages(
+        AgentAnswer(
+            text="پاسخ [1]",
+            sources=[AgentSource(title="t", url='https://example.com/"><b>')],
+            grounded=True,
+        )
+    )
+
+    assert 'href="https://example.com/&quot;&gt;&lt;b&gt;"' in messages[0]

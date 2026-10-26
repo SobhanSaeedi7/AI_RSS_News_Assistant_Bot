@@ -20,7 +20,12 @@ from sqlalchemy.ext.asyncio import (
 from ai_rss_news_assistant.db.base import Base
 from ai_rss_news_assistant.db.models import NewsItem, User, UserFeed
 from ai_rss_news_assistant.db.repository import create_news_item
-from ai_rss_news_assistant.db.rss_ingestion import ingest_feeds_for_user
+from ai_rss_news_assistant.db.rss_ingestion import (
+    _safe_url_for_log,
+    _SafeRedirectHandler,
+    _validate_url,
+    ingest_feeds_for_user,
+)
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -134,7 +139,7 @@ async def test_ingest_feeds_success() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 return_value=_make_feed_response([]),
             ),
             patch(
@@ -191,7 +196,7 @@ async def test_ingest_feeds_duplicate_not_created() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 return_value=_make_feed_response([]),
             ),
             patch(
@@ -226,7 +231,7 @@ async def test_ingest_feeds_skips_entry_without_url() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 return_value=_make_feed_response([]),
             ),
             patch(
@@ -243,6 +248,43 @@ async def test_ingest_feeds_skips_entry_without_url() -> None:
             select(NewsItem).where(NewsItem.user_id == user.id)
         )
         assert len(items.scalars().all()) == 1
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_ingest_feeds_skips_malformed_article_url() -> None:
+    """A malformed article URL does not abort later entries in the same feed."""
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=312)
+        await _add_feed(session, user, url="https://example.com/feed.xml")
+
+        malformed = _make_entry(url="http://[::1", title="Malformed Article")
+        valid = _make_entry(url="https://example.com/article/1", title="Valid Article")
+        parsed = _make_parsed_feed([malformed, valid])
+
+        with (
+            patch(
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
+                return_value=_make_feed_response([]),
+            ),
+            patch(
+                "ai_rss_news_assistant.db.rss_ingestion.feedparser.parse",
+                return_value=parsed,
+            ),
+        ):
+            stats = await ingest_feeds_for_user(session, user.id)
+
+        assert stats["items_created"] == 1
+        assert stats["errors"] == []
+
+        items = await session.execute(
+            select(NewsItem).where(NewsItem.user_id == user.id)
+        )
+        db_items = items.scalars().all()
+        assert len(db_items) == 1
+        assert db_items[0].title == "Valid Article"
     finally:
         await _close_session(session)
 
@@ -266,7 +308,7 @@ async def test_ingest_feeds_missing_fields() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 return_value=_make_feed_response([]),
             ),
             patch(
@@ -310,7 +352,7 @@ async def test_ingest_feeds_request_failure_isolated() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 side_effect=[
                     _make_feed_response([]),  # good feed response
                     OSError("connection refused"),  # bad feed raises error
@@ -354,7 +396,7 @@ async def test_ingest_feeds_user_isolation() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 return_value=_make_feed_response([]),
             ),
             patch(
@@ -408,7 +450,7 @@ async def test_ingest_feeds_inactive_feed_skipped() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 return_value=_make_feed_response([]),
             ),
             patch(
@@ -466,7 +508,7 @@ async def test_ingest_feeds_integrity_conflict_does_not_block_later_articles() -
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 return_value=_make_feed_response([]),
             ),
             patch(
@@ -524,7 +566,7 @@ async def test_ingest_feeds_integrity_conflict_preserves_transaction() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+                "ai_rss_news_assistant.db.rss_ingestion._open_url",
                 return_value=_make_feed_response([]),
             ),
             patch(
@@ -561,7 +603,7 @@ async def test_ingest_feeds_oversized_response_rejected() -> None:
         response.read = MagicMock(return_value=oversized_body)
 
         with patch(
-            "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+            "ai_rss_news_assistant.db.rss_ingestion._open_url",
             return_value=response,
         ):
             stats = await ingest_feeds_for_user(session, user.id)
@@ -583,7 +625,7 @@ async def test_ingest_feeds_unsupported_scheme_rejected() -> None:
         await _add_feed(session, user, url="ftp://example.com/feed.xml")
 
         with patch(
-            "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+            "ai_rss_news_assistant.db.rss_ingestion._open_url",
             return_value=_make_feed_response([]),
         ):
             stats = await ingest_feeds_for_user(session, user.id)
@@ -604,7 +646,7 @@ async def test_ingest_feeds_private_ip_rejected() -> None:
         await _add_feed(session, user, url="http://127.0.0.1/feed.xml")
 
         with patch(
-            "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+            "ai_rss_news_assistant.db.rss_ingestion._open_url",
             return_value=_make_feed_response([]),
         ):
             stats = await ingest_feeds_for_user(session, user.id)
@@ -614,6 +656,50 @@ async def test_ingest_feeds_private_ip_rejected() -> None:
         assert len(stats["errors"]) == 1
     finally:
         await _close_session(session)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://192.168.0.1/feed.xml",
+        "http://192.168.255.254/feed.xml",
+        "http://100.64.0.1/feed.xml",
+        "http://198.18.0.1/feed.xml",
+    ],
+)
+def test_validate_url_blocks_private_and_reserved_ranges(url: str) -> None:
+    """All private/reserved IPv4 ranges are rejected, not only loopback."""
+    with pytest.raises(ValueError, match="not allowed"):
+        _validate_url(url)
+
+
+def test_validate_url_rejects_embedded_credentials() -> None:
+    """Feed credentials must not be stored or written to logs."""
+    with pytest.raises(ValueError, match="credentials"):
+        _validate_url("https://user:password@example.com/feed.xml")
+
+
+def test_safe_url_for_log_strips_credentials_and_path() -> None:
+    """Log labels contain only the host, never userinfo or path."""
+    assert (
+        _safe_url_for_log("https://user:password@example.com/private/feed.xml")
+        == "example.com"
+    )
+
+
+def test_redirect_handler_rejects_private_target_before_following() -> None:
+    """A redirect to a private IP is rejected before urllib follows it."""
+    handler = _SafeRedirectHandler()
+
+    with pytest.raises(ValueError, match="not allowed"):
+        handler.redirect_request(
+            MagicMock(),
+            MagicMock(),
+            302,
+            "Found",
+            {},
+            "http://192.168.1.1/internal",
+        )
 
 
 @pytest.mark.anyio
@@ -629,7 +715,7 @@ async def test_ingest_feeds_redirect_to_private_ip_rejected() -> None:
         response.read = MagicMock(return_value=b"<rss><channel></channel></rss>")
 
         with patch(
-            "ai_rss_news_assistant.db.rss_ingestion.urllib.request.urlopen",
+            "ai_rss_news_assistant.db.rss_ingestion._open_url",
             return_value=response,
         ):
             stats = await ingest_feeds_for_user(session, user.id)
