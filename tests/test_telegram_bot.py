@@ -31,6 +31,11 @@ from ai_rss_news_assistant.main import (
     AGENT_ERROR,
     ASK_TOO_LONG,
     ASK_USAGE,
+    DELIVERY_OFF,
+    DELIVERY_ON,
+    DELIVERY_STATUS_OFF,
+    DELIVERY_STATUS_ON,
+    DELIVERY_USAGE,
     NEWS_EMPTY,
     NEWS_MAX_MESSAGE_LENGTH,
     _feed_display_name,
@@ -38,6 +43,7 @@ from ai_rss_news_assistant.main import (
     ask_command,
     build_ask_messages,
     delete_feed_command,
+    delivery_command,
     help_command,
     list_feeds_command,
     news_command,
@@ -1050,6 +1056,105 @@ async def test_news_command_handles_missing_dates_and_long_output(tmp_path) -> N
         assert "تاریخ انتشار" not in combined
         assert "…" in combined
         assert all(call.kwargs["parse_mode"] == "HTML" for call in calls)
+    finally:
+        await db.dispose()
+
+
+# --- /delivery command (real database) ---
+
+
+async def _delivery_preference(db: Database, telegram_user_id: int) -> bool:
+    async with db.session() as session:
+        user = await get_user_by_telegram_id(session, telegram_user_id)
+        assert user is not None
+        return user.auto_delivery_enabled
+
+
+@pytest.mark.anyio
+async def test_delivery_command_defaults_to_on(tmp_path) -> None:
+    """A new user sees automatic delivery enabled by default."""
+    db = await _make_real_db(tmp_path)
+    try:
+        update = _make_update()
+        context = _make_context(db)
+
+        await delivery_command(update, context)
+
+        update.effective_message.reply_text.assert_awaited_once_with(DELIVERY_STATUS_ON)
+        assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is True
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_delivery_command_turns_off_and_persists(tmp_path) -> None:
+    """`/delivery off` is persisted and reflected on the next invocation."""
+    db = await _make_real_db(tmp_path)
+    try:
+        update = _make_update()
+        await delivery_command(update, _make_context(db, args=["off"]))
+
+        update.effective_message.reply_text.assert_awaited_once_with(DELIVERY_OFF)
+        assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is False
+
+        status_update = _make_update()
+        await delivery_command(status_update, _make_context(db))
+        status_update.effective_message.reply_text.assert_awaited_once_with(
+            DELIVERY_STATUS_OFF
+        )
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_delivery_command_turns_on(tmp_path) -> None:
+    """`/delivery on` re-enables delivery for a user who disabled it."""
+    db = await _make_real_db(tmp_path)
+    try:
+        async with db.session() as session:
+            await create_user(
+                session, _TEST_TELEGRAM_USER_ID, auto_delivery_enabled=False
+            )
+
+        update = _make_update()
+        await delivery_command(update, _make_context(db, args=["ON"]))
+
+        update.effective_message.reply_text.assert_awaited_once_with(DELIVERY_ON)
+        assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is True
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_delivery_command_rejects_invalid_argument(tmp_path) -> None:
+    """An unknown argument shows usage and leaves the preference untouched."""
+    db = await _make_real_db(tmp_path)
+    try:
+        async with db.session() as session:
+            await create_user(session, _TEST_TELEGRAM_USER_ID)
+
+        update = _make_update()
+        await delivery_command(update, _make_context(db, args=["maybe"]))
+
+        update.effective_message.reply_text.assert_awaited_once_with(DELIVERY_USAGE)
+        assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is True
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_delivery_preference_is_per_user(tmp_path) -> None:
+    """Disabling delivery for one user does not affect another user."""
+    db = await _make_real_db(tmp_path)
+    try:
+        other_telegram_id = _TEST_TELEGRAM_USER_ID + 1
+        async with db.session() as session:
+            await create_user(session, other_telegram_id)
+
+        await delivery_command(_make_update(), _make_context(db, args=["off"]))
+
+        assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is False
+        assert await _delivery_preference(db, other_telegram_id) is True
     finally:
         await db.dispose()
 

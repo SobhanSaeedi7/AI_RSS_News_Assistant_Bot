@@ -16,7 +16,7 @@ import uuid
 from urllib.parse import urlsplit
 
 from sqlalchemy.exc import IntegrityError
-from telegram import Update
+from telegram import Bot, Update
 from telegram.error import InvalidToken, TelegramError
 from telegram.ext import (
     ApplicationBuilder,
@@ -41,11 +41,14 @@ from ai_rss_news_assistant.db.repository import (
     get_user_by_telegram_id,
     list_feeds,
     list_news_items_with_feed,
+    update_user_settings,
 )
 from ai_rss_news_assistant.db.rss_worker import NewsWorker
 from ai_rss_news_assistant.db.url_normalization import normalize_url
+from ai_rss_news_assistant.delivery import DeliveryService
 from ai_rss_news_assistant.llm import build_chat_client
 from ai_rss_news_assistant.logging import setup_logging
+from ai_rss_news_assistant.summarization import build_summarizer
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +61,7 @@ WELCOME_MESSAGE = (
     "/listfeeds - مشاهده فیدهای شما\n"
     "/delfeed <id> - حذف یک فید\n"
     "/news - نمایش آخرین اخبار ذخیره‌شده\n"
+    "/delivery on|off - روشن یا خاموش کردن ارسال خودکار\n"
     "/ask <سؤال> - پرسیدن سؤال از خبرهای ذخیره‌شده شما"
 )
 
@@ -70,6 +74,7 @@ HELP_MESSAGE = (
     "/listfeeds - مشاهده فیدهای شما\n"
     "/delfeed <id> - حذف یک فید\n"
     "/news - نمایش آخرین اخبار ذخیره‌شده\n"
+    "/delivery on|off - روشن یا خاموش کردن ارسال خودکار\n"
     "/ask <سؤال> - پرسیدن سؤال از خبرهای ذخیره‌شده شما"
 )
 
@@ -127,6 +132,19 @@ NEWS_EMPTY = (
 )
 
 NEWS_HEADER = "آخرین اخبار شما:\n\n"
+
+DELIVERY_USAGE = (
+    "برای تغییر وضعیت ارسال خودکار:\n"
+    "/delivery on - روشن کردن ارسال خودکار\n"
+    "/delivery off - خاموش کردن ارسال خودکار\n"
+    "/delivery - مشاهده وضعیت فعلی"
+)
+
+DELIVERY_ON = "ارسال خودکار خبرها روشن شد."
+DELIVERY_OFF = "ارسال خودکار خبرها خاموش شد."
+
+DELIVERY_STATUS_ON = "وضعیت ارسال خودکار: روشن ✅"
+DELIVERY_STATUS_OFF = "وضعیت ارسال خودکار: خاموش ⛔"
 
 ASK_USAGE = (
     "برای پرسیدن سؤال درباره خبرهای ذخیره‌شده:\n"
@@ -366,6 +384,37 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text(message, parse_mode="HTML")
 
 
+async def delivery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /delivery [on|off]: show or update the delivery preference."""
+    telegram_user = update.effective_user
+    if telegram_user is None or update.effective_message is None:
+        return
+
+    args = [argument.lower() for argument in context.args]
+    if len(args) > 1 or (args and args[0] not in ("on", "off")):
+        await update.effective_message.reply_text(DELIVERY_USAGE)
+        return
+
+    db: Database = context.application.bot_data["db"]
+    async with db.session() as session:
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if user is None:
+            user = await create_user(session, telegram_user.id)
+
+        if args:
+            enabled = args[0] == "on"
+            await update_user_settings(session, user.id, auto_delivery_enabled=enabled)
+            user.auto_delivery_enabled = enabled
+
+        enabled = user.auto_delivery_enabled
+
+    if args:
+        message = DELIVERY_ON if enabled else DELIVERY_OFF
+    else:
+        message = DELIVERY_STATUS_ON if enabled else DELIVERY_STATUS_OFF
+    await update.effective_message.reply_text(message)
+
+
 def _entity_safe_cut(text: str, limit: int) -> int:
     """Back off a hard cut so an ``&...;`` HTML entity is not split."""
     ampersand = text.rfind("&", 0, limit)
@@ -527,6 +576,7 @@ def main() -> None:
         application.add_handler(CommandHandler("listfeeds", list_feeds_command))
         application.add_handler(CommandHandler("delfeed", delete_feed_command))
         application.add_handler(CommandHandler("news", news_command))
+        application.add_handler(CommandHandler("delivery", delivery_command))
         application.add_handler(CommandHandler("ask", ask_command))
         application.add_error_handler(_error_handler)
 
@@ -566,10 +616,11 @@ def main() -> None:
 
 
 def worker() -> None:
-    """Initialize the worker process: configuration and logging only.
+    """Initialize the worker process: ingestion, summarization, and delivery.
 
-    The worker service does not interact with Telegram, so it does not require
-    BOT_TOKEN. RSS polling, summarization, and scheduled delivery run here.
+    The worker sends automatic delivery messages, so it uses ``BOT_TOKEN`` when
+    it is configured. Without a token it still ingests news; delivery is
+    disabled and a warning is logged.
     """
     settings = Settings()
     setup_logging(settings.log_level)
@@ -580,15 +631,57 @@ def worker() -> None:
     fetch_full_text = os.environ.get("FETCH_FULL_TEXT", "true").lower() == "true"
     fetch_timeout = int(os.environ.get("FETCH_TIMEOUT_SECONDS", "30"))
 
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    bot: Bot | None = None
+    if settings.bot_token is not None:
+        try:
+            bot = Bot(settings.bot_token)
+        except InvalidToken:
+            # The exception message contains the rejected token; never log it.
+            logger.error("Telegram rejected BOT_TOKEN; automatic delivery is disabled")
+            bot = None
+        else:
+            try:
+                loop.run_until_complete(bot.initialize())
+            except InvalidToken:
+                # The exception message contains the rejected token; never log it.
+                logger.error(
+                    "Telegram rejected BOT_TOKEN; automatic delivery is disabled"
+                )
+                try:
+                    loop.run_until_complete(bot.shutdown())
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    logger.debug("Telegram bot cleanup after invalid token failed")
+                bot = None
+            except Exception:  # noqa: BLE001 - connectivity failures must not stop ingestion
+                # Connectivity problems must not stop RSS ingestion. Delivery
+                # attempts fail per item and are retried on the next poll.
+                logger.warning(
+                    "Could not initialize the Telegram bot; delivery attempts will "
+                    "retry on each poll"
+                )
+    else:
+        logger.warning("BOT_TOKEN is not set; automatic delivery is disabled")
+
+    delivery_service = (
+        DeliveryService(
+            session_factory=db.session_factory,
+            bot=bot,
+            summarizer=build_summarizer(settings),
+        )
+        if bot is not None
+        else None
+    )
+
     news_worker = NewsWorker(
         engine=db.engine,
         poll_interval_seconds=poll_interval,
         fetch_full_text=fetch_full_text,
         fetch_timeout=fetch_timeout,
+        delivery_service=delivery_service,
     )
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         loop.add_signal_handler(
@@ -605,5 +698,10 @@ def worker() -> None:
     try:
         loop.run_until_complete(news_worker.run())
     finally:
+        if bot is not None:
+            try:
+                loop.run_until_complete(bot.shutdown())
+            except Exception:
+                logger.exception("Failed to shut down the Telegram bot")
         loop.run_until_complete(db.dispose())
         loop.close()

@@ -246,6 +246,31 @@ async def list_news_items_with_feed(
     return [(item, feed) for item, feed in result.all()]
 
 
+async def list_undelivered_news_items_with_feed(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    limit: int = 5,
+) -> list[tuple[NewsItem, UserFeed]]:
+    """Return the user's oldest news items that were not delivered yet.
+
+    The join is scoped by ``user_id`` on both sides and already-delivered
+    items are excluded with a subquery on ``news_deliveries``. Items are
+    ordered oldest first so a bounded batch cannot starve older articles.
+    """
+    delivered = select(NewsDelivery.news_item_id).where(NewsDelivery.user_id == user_id)
+    result = await session.execute(
+        select(NewsItem, UserFeed)
+        .join(
+            UserFeed,
+            (UserFeed.id == NewsItem.feed_id) & (UserFeed.user_id == NewsItem.user_id),
+        )
+        .where(NewsItem.user_id == user_id, NewsItem.id.not_in(delivered))
+        .order_by(NewsItem.fetched_at.asc(), NewsItem.id)
+        .limit(limit)
+    )
+    return [(item, feed) for item, feed in result.all()]
+
+
 def _escape_like(term: str) -> str:
     """Escape LIKE wildcards so user text is matched literally."""
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
