@@ -18,6 +18,7 @@ from telegram import Update
 from telegram.error import InvalidToken, TelegramError
 from telegram.ext import Application, ContextTypes
 
+from ai_rss_news_assistant.agent import AgentAnswer, AgentSource
 from ai_rss_news_assistant.db.base import Base, Database
 from ai_rss_news_assistant.db.models import User, UserFeed
 from ai_rss_news_assistant.db.repository import (
@@ -27,10 +28,15 @@ from ai_rss_news_assistant.db.repository import (
     get_user_by_telegram_id,
 )
 from ai_rss_news_assistant.main import (
+    AGENT_ERROR,
+    ASK_TOO_LONG,
+    ASK_USAGE,
     NEWS_EMPTY,
     NEWS_MAX_MESSAGE_LENGTH,
     _feed_display_name,
     add_feed_command,
+    ask_command,
+    build_ask_messages,
     delete_feed_command,
     help_command,
     list_feeds_command,
@@ -60,10 +66,12 @@ def _make_update(telegram_user_id: int = _TEST_TELEGRAM_USER_ID) -> MagicMock:
     return update
 
 
-def _make_context(db: MagicMock, args: list | None = None) -> MagicMock:
+def _make_context(db: MagicMock, args: list | None = None, agent=None) -> MagicMock:
     """Create a mock ContextTypes.DEFAULT_TYPE with application.bot_data."""
     application = MagicMock(spec=Application)
     application.bot_data = {"db": db}
+    if agent is not None:
+        application.bot_data["agent"] = agent
     context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
     context.application = application
     context.args = args or []
@@ -515,6 +523,34 @@ async def test_list_feeds_with_feeds() -> None:
     assert "https://example.com/feed.xml" in text
     assert "فعال" in text
     assert "غیرفعال" in text
+
+
+@pytest.mark.anyio
+async def test_list_feeds_splits_long_output() -> None:
+    """A user with many/long feeds does not get one over-limit message."""
+    update = _make_update()
+    context = _make_context(AsyncMock())
+
+    _mock_db_session(context.application.bot_data["db"])
+
+    feed = MagicMock(spec=UserFeed)
+    feed.id = uuid.UUID("00000000-0000-0000-0000-000000000100")
+    feed.title = "T" * 2000
+    feed.url = "https://example.com/" + "a" * 2000
+    feed.active = True
+
+    with patch(
+        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        return_value=MagicMock(spec=User),
+    ), patch(
+        "ai_rss_news_assistant.main.list_feeds",
+        return_value=[feed, feed, feed],
+    ):
+        await list_feeds_command(update, context)
+
+    assert update.effective_message.reply_text.call_count > 1
+    for call in update.effective_message.reply_text.call_args_list:
+        assert len(call.args[0]) <= 4000
 
 
 @pytest.mark.anyio
@@ -1016,3 +1052,206 @@ async def test_news_command_handles_missing_dates_and_long_output(tmp_path) -> N
         assert all(call.kwargs["parse_mode"] == "HTML" for call in calls)
     finally:
         await db.dispose()
+
+
+# --- /ask command ---
+
+
+class _FakeAgent:
+    """Stand-in for NewsAgent that records calls and returns a canned answer."""
+
+    def __init__(self, answer: AgentAnswer | None = None, error=None) -> None:
+        self.calls: list[tuple] = []
+        self._answer = answer
+        self._error = error
+
+    async def answer(self, user_id, question: str) -> AgentAnswer:
+        self.calls.append((user_id, question))
+        if self._error is not None:
+            raise self._error
+        return self._answer
+
+
+def _grounded_answer(
+    text: str = "پاسخ آزمایشی [1]",
+    url: str = "https://example.com/ai",
+) -> AgentAnswer:
+    return AgentAnswer(
+        text=text,
+        sources=[AgentSource(title="هوش مصنوعی در ایران", url=url)],
+        grounded=True,
+    )
+
+
+@pytest.mark.anyio
+async def test_ask_command_requires_a_question() -> None:
+    agent = _FakeAgent(_grounded_answer())
+    update = _make_update()
+
+    await ask_command(update, _make_context(AsyncMock(), agent=agent))
+
+    update.effective_message.reply_text.assert_awaited_once_with(ASK_USAGE)
+    assert agent.calls == []
+
+
+@pytest.mark.anyio
+async def test_ask_command_rejects_long_question() -> None:
+    agent = _FakeAgent(_grounded_answer())
+    update = _make_update()
+
+    await ask_command(
+        update,
+        _make_context(AsyncMock(), args=["x" * 501], agent=agent),
+    )
+
+    update.effective_message.reply_text.assert_awaited_once_with(ASK_TOO_LONG)
+    assert agent.calls == []
+
+
+@pytest.mark.anyio
+async def test_ask_command_renders_answer_and_sources(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        agent = _FakeAgent(_grounded_answer())
+        update = _make_update()
+
+        await ask_command(
+            update,
+            _make_context(db, args=["خبرهای", "فناوری"], agent=agent),
+        )
+
+        calls = update.effective_message.reply_text.await_args_list
+        assert len(calls) == 1
+        text = calls[0].args[0]
+        assert "پاسخ آزمایشی" in text
+        assert '<a href="https://example.com/ai">' in text
+        assert "هوش مصنوعی در ایران" in text
+        assert calls[0].kwargs["parse_mode"] == "HTML"
+        assert calls[0].kwargs["disable_web_page_preview"] is True
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_ask_command_passes_internal_user_id(tmp_path) -> None:
+    """The handler resolves the Telegram user to its internal id for retrieval."""
+    db = await _make_real_db(tmp_path)
+    try:
+        async with db.session() as session:
+            user = await create_user(session, _TEST_TELEGRAM_USER_ID)
+            expected_id = user.id
+
+        agent = _FakeAgent(_grounded_answer())
+        update = _make_update()
+
+        await ask_command(update, _make_context(db, args=["سؤال"], agent=agent))
+
+        assert agent.calls == [(expected_id, "سؤال")]
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_ask_command_splits_long_answers(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        agent = _FakeAgent(AgentAnswer(text="کلمه " * 2000))
+        update = _make_update()
+
+        await ask_command(update, _make_context(db, args=["سؤال"], agent=agent))
+
+        calls = update.effective_message.reply_text.await_args_list
+        assert len(calls) >= 2
+        assert all(len(call.args[0]) <= 4000 for call in calls)
+        assert all(call.kwargs["parse_mode"] == "HTML" for call in calls)
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_ask_command_handles_agent_failure(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        agent = _FakeAgent(error=RuntimeError("boom"))
+        update = _make_update()
+
+        await ask_command(update, _make_context(db, args=["سؤال"], agent=agent))
+
+        calls = update.effective_message.reply_text.await_args_list
+        assert len(calls) == 1
+        assert calls[0].args[0] == AGENT_ERROR
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_ask_command_survives_telegram_error(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        agent = _FakeAgent(_grounded_answer())
+        update = _make_update()
+        update.effective_message.reply_text.side_effect = TelegramError("boom")
+
+        await ask_command(update, _make_context(db, args=["سؤال"], agent=agent))
+
+        update.effective_message.reply_text.assert_awaited_once()
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_ask_command_escapes_html_in_answer(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        agent = _FakeAgent(AgentAnswer(text="<script>alert(1)</script> [1]"))
+        update = _make_update()
+
+        await ask_command(update, _make_context(db, args=["سؤال"], agent=agent))
+
+        text = update.effective_message.reply_text.await_args.args[0]
+        assert "&lt;script&gt;" in text
+        assert "<script>" not in text
+    finally:
+        await db.dispose()
+
+
+def test_build_ask_messages_omits_sources_when_not_grounded() -> None:
+    messages = build_ask_messages(AgentAnswer(text="اطلاعات کافی پیدا نشد."))
+
+    assert messages == ["اطلاعات کافی پیدا نشد."]
+
+
+def test_split_message_never_breaks_html_entities() -> None:
+    from ai_rss_news_assistant.main import _split_message
+
+    word = "&amp;" * 100
+    chunks = _split_message(word, 17)
+
+    assert "".join(chunks) == word
+    assert all(len(chunk) <= 17 for chunk in chunks)
+    assert all(len(chunk) % 5 == 0 for chunk in chunks)
+
+
+def test_build_ask_messages_does_not_link_unsafe_urls() -> None:
+    messages = build_ask_messages(
+        AgentAnswer(
+            text="پاسخ [1]",
+            sources=[AgentSource(title="<b>bad</b>", url="javascript:alert(1)")],
+            grounded=True,
+        )
+    )
+
+    assert "<a href=" not in messages[0]
+    assert "&lt;b&gt;bad&lt;/b&gt;" in messages[0]
+
+
+def test_build_ask_messages_escapes_source_url_attributes() -> None:
+    messages = build_ask_messages(
+        AgentAnswer(
+            text="پاسخ [1]",
+            sources=[AgentSource(title="t", url='https://example.com/"><b>')],
+            grounded=True,
+        )
+    )
+
+    assert 'href="https://example.com/&quot;&gt;&lt;b&gt;"' in messages[0]

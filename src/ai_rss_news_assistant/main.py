@@ -24,6 +24,13 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from ai_rss_news_assistant.agent import (
+    AGENT_ERROR,
+    AgentAnswer,
+    AgentSource,
+    NewsAgent,
+    safe_url,
+)
 from ai_rss_news_assistant.config import Settings
 from ai_rss_news_assistant.db.base import Database
 from ai_rss_news_assistant.db.models import NewsItem, UserFeed
@@ -37,6 +44,7 @@ from ai_rss_news_assistant.db.repository import (
 )
 from ai_rss_news_assistant.db.rss_worker import NewsWorker
 from ai_rss_news_assistant.db.url_normalization import normalize_url
+from ai_rss_news_assistant.llm import build_chat_client
 from ai_rss_news_assistant.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -49,7 +57,8 @@ WELCOME_MESSAGE = (
     "/addfeed <url> - اضافه کردن فید RSS جدید\n"
     "/listfeeds - مشاهده فیدهای شما\n"
     "/delfeed <id> - حذف یک فید\n"
-    "/news - نمایش آخرین اخبار ذخیره‌شده"
+    "/news - نمایش آخرین اخبار ذخیره‌شده\n"
+    "/ask <سؤال> - پرسیدن سؤال از خبرهای ذخیره‌شده شما"
 )
 
 HELP_MESSAGE = (
@@ -60,7 +69,8 @@ HELP_MESSAGE = (
     "/addfeed <url> - اضافه کردن فید RSS جدید\n"
     "/listfeeds - مشاهده فیدهای شما\n"
     "/delfeed <id> - حذف یک فید\n"
-    "/news - نمایش آخرین اخبار ذخیره‌شده"
+    "/news - نمایش آخرین اخبار ذخیره‌شده\n"
+    "/ask <سؤال> - پرسیدن سؤال از خبرهای ذخیره‌شده شما"
 )
 
 ADD_FEED_USAGE = (
@@ -87,6 +97,7 @@ LIST_FEEDS_EMPTY = (
 )
 
 LIST_FEEDS_HEADER = "فیدهای شما:\n\n"
+LIST_FEEDS_MAX_MESSAGE_LENGTH = 4000
 
 LIST_FEED_ITEM = "{id}. {title} — {url} ({status})\n"
 
@@ -116,6 +127,18 @@ NEWS_EMPTY = (
 )
 
 NEWS_HEADER = "آخرین اخبار شما:\n\n"
+
+ASK_USAGE = (
+    "برای پرسیدن سؤال درباره خبرهای ذخیره‌شده:\n"
+    "/ask <سؤال>\n\n"
+    "مثال:\n"
+    "/ask مهم‌ترین خبرهای فناوری این هفته چه بود؟"
+)
+ASK_TOO_LONG = "سؤال شما طولانی است. لطفاً آن را کوتاه‌تر مطرح کنید."
+ASK_MAX_QUESTION_LENGTH = 500
+# Telegram rejects messages longer than 4096 characters; keep a safety margin.
+ASK_MAX_MESSAGE_LENGTH = 4000
+ASK_MAX_SOURCE_TITLE_LENGTH = 200
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -234,7 +257,8 @@ async def list_feeds_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             LIST_FEED_ITEM.format(id=feed.id, title=title, url=feed.url, status=status)
         )
 
-    await update.effective_message.reply_text("".join(lines))
+    for message in _split_message("".join(lines), LIST_FEEDS_MAX_MESSAGE_LENGTH):
+        await update.effective_message.reply_text(message)
 
 
 async def delete_feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -342,6 +366,109 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text(message, parse_mode="HTML")
 
 
+def _entity_safe_cut(text: str, limit: int) -> int:
+    """Back off a hard cut so an ``&...;`` HTML entity is not split."""
+    ampersand = text.rfind("&", 0, limit)
+    if ampersand != -1 and ";" not in text[ampersand:limit]:
+        return ampersand or limit
+    return limit
+
+
+def _split_message(text: str, limit: int) -> list[str]:
+    """Split text on word boundaries so HTML entities are never cut in half."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    for word in text.split(" "):
+        candidate = f"{current} {word}" if current else word
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        while len(word) > limit:
+            cut = _entity_safe_cut(word, limit)
+            chunks.append(word[:cut])
+            word = word[cut:]
+        current = word
+    if current:
+        chunks.append(current)
+    return chunks or [text[:limit]]
+
+
+def _format_sources(sources: list[AgentSource]) -> str:
+    """Render source titles as clickable links, escaping all stored text."""
+    lines = ["منابع:"]
+    for index, source in enumerate(sources, start=1):
+        title = html.escape(
+            _truncate(source.title, ASK_MAX_SOURCE_TITLE_LENGTH), quote=False
+        )
+        url = safe_url(source.url)
+        if url is not None and len(url) <= 2000:
+            href = html.escape(url, quote=True)
+            lines.append(f'[{index}] <a href="{href}">{title}</a>')
+        else:
+            lines.append(f"[{index}] {title}")
+    return "\n".join(lines)
+
+
+def build_ask_messages(answer: AgentAnswer) -> list[str]:
+    """Render an agent answer and its sources as Telegram-safe chunks."""
+    text = answer.text.strip() or AGENT_ERROR
+    messages = _split_message(html.escape(text, quote=False), ASK_MAX_MESSAGE_LENGTH)
+    if answer.grounded and answer.sources:
+        sources = _format_sources(answer.sources)
+        if len(messages[-1]) + 2 + len(sources) <= ASK_MAX_MESSAGE_LENGTH:
+            messages[-1] = f"{messages[-1]}\n\n{sources}"
+        else:
+            messages.extend(_split_message(sources, ASK_MAX_MESSAGE_LENGTH))
+    return messages
+
+
+async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /ask <question>: answer from this user's stored news only."""
+    telegram_user = update.effective_user
+    if telegram_user is None or update.effective_message is None:
+        return
+
+    question = " ".join(context.args).strip()
+    if not question:
+        await update.effective_message.reply_text(ASK_USAGE)
+        return
+    if len(question) > ASK_MAX_QUESTION_LENGTH:
+        await update.effective_message.reply_text(ASK_TOO_LONG)
+        return
+
+    db: Database = context.application.bot_data["db"]
+    agent: NewsAgent = context.application.bot_data["agent"]
+
+    async with db.session() as session:
+        user = await get_user_by_telegram_id(session, telegram_user.id)
+        if user is None:
+            user = await create_user(session, telegram_user.id)
+        user_id = user.id
+
+    try:
+        answer = await agent.answer(user_id, question)
+    except Exception:  # a handler must never crash polling
+        logger.exception("Agent failed to answer a question")
+        answer = AgentAnswer(text=AGENT_ERROR)
+
+    for message in build_ask_messages(answer):
+        try:
+            await update.effective_message.reply_text(
+                message, parse_mode="HTML", disable_web_page_preview=True
+            )
+        except TelegramError:
+            logger.warning(
+                "Failed to send an agent answer to Telegram user %s",
+                telegram_user.id,
+            )
+            break
+
+
 async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log errors caused by Updates without leaking secrets."""
     logger.exception("Exception while handling an update: %s", context.error)
@@ -389,6 +516,10 @@ def main() -> None:
             .build()
         )
         application.bot_data["db"] = db
+        application.bot_data["agent"] = NewsAgent(
+            session_factory=db.session_factory,
+            client=build_chat_client(settings),
+        )
 
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
@@ -396,6 +527,7 @@ def main() -> None:
         application.add_handler(CommandHandler("listfeeds", list_feeds_command))
         application.add_handler(CommandHandler("delfeed", delete_feed_command))
         application.add_handler(CommandHandler("news", news_command))
+        application.add_handler(CommandHandler("ask", ask_command))
         application.add_error_handler(_error_handler)
 
         try:

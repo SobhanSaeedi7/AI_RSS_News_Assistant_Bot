@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ai_rss_news_assistant.db.models import (
@@ -244,6 +244,68 @@ async def list_news_items_with_feed(
         .limit(limit)
     )
     return [(item, feed) for item, feed in result.all()]
+
+
+def _escape_like(term: str) -> str:
+    """Escape LIKE wildcards so user text is matched literally."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+async def search_news_items(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    terms: list[str],
+    limit: int = 5,
+) -> list[tuple[NewsItem, UserFeed]]:
+    """Return the user's news items matching any of ``terms``, best first.
+
+    Matching is a case-insensitive substring search over the title, stored
+    summary, stored content, and feed title. Candidates are re-ranked in
+    Python by the number of distinct query terms they contain, then by
+    recency. This is deterministic keyword matching, not semantic search:
+    PostgreSQL's built-in full-text search has no Persian configuration.
+
+    The query is always scoped to ``user_id`` on both the news item and its
+    feed, so another user's rows can never be returned.
+    """
+    if not terms or limit <= 0:
+        return []
+
+    conditions = []
+    for term in terms:
+        pattern = f"%{_escape_like(term)}%"
+        conditions.append(
+            or_(
+                NewsItem.title.ilike(pattern, escape="\\"),
+                NewsItem.summary.ilike(pattern, escape="\\"),
+                NewsItem.content.ilike(pattern, escape="\\"),
+                UserFeed.title.ilike(pattern, escape="\\"),
+            )
+        )
+
+    result = await session.execute(
+        select(NewsItem, UserFeed)
+        .join(
+            UserFeed,
+            (UserFeed.id == NewsItem.feed_id) & (UserFeed.user_id == NewsItem.user_id),
+        )
+        .where(NewsItem.user_id == user_id, or_(*conditions))
+        .order_by(NewsItem.fetched_at.desc(), NewsItem.url)
+        .limit(limit * 4)
+    )
+
+    ranked: list[tuple[int, NewsItem, UserFeed]] = []
+    for item, feed in result.all():
+        haystack = " ".join(
+            part
+            for part in (item.title, item.summary, item.content, feed.title)
+            if part
+        ).lower()
+        score = sum(1 for term in terms if term in haystack)
+        ranked.append((score, item, feed))
+
+    ranked.sort(key=lambda row: (row[0], row[1].fetched_at), reverse=True)
+    return [(item, feed) for _, item, feed in ranked[:limit]]
 
 
 async def create_delivery(
