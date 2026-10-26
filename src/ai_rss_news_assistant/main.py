@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 from sqlalchemy.exc import IntegrityError
 from telegram import Update
+from telegram.error import InvalidToken, TelegramError
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -152,9 +153,22 @@ async def add_feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     url = args[0].strip()
 
-    # Validate scheme is http/https before normalization
-    scheme = urlsplit(url).scheme.lower()
-    if scheme not in ("http", "https"):
+    # Parse before validation so malformed IPv6 input is handled as an invalid
+    # URL instead of surfacing a ValueError. Reject non-http(s) schemes and
+    # embedded credentials before normalization; credentials could otherwise
+    # be stored and appear in logs.
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        await update.effective_message.reply_text(ADD_FEED_INVALID)
+        return
+
+    if (
+        parts.scheme.lower() not in ("http", "https")
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+    ):
         await update.effective_message.reply_text(ADD_FEED_INVALID)
         return
 
@@ -265,7 +279,10 @@ def _feed_display_name(feed: UserFeed) -> str:
     """Prefer the feed title, falling back to the feed URL's hostname."""
     if feed.title:
         return feed.title
-    return urlsplit(feed.url).hostname or feed.url
+    try:
+        return urlsplit(feed.url).hostname or feed.url
+    except ValueError:
+        return feed.url
 
 
 def _format_news_item(index: int, item: NewsItem, feed: UserFeed) -> str:
@@ -393,6 +410,10 @@ def main() -> None:
         loop.run_until_complete(application.start())
         loop.run_until_complete(application.updater.start_polling())
         loop.run_forever()
+    except InvalidToken:
+        # InvalidToken messages can contain the rejected token; log a fixed
+        # message instead of the exception text or traceback.
+        logger.error("Telegram rejected BOT_TOKEN; the bot cannot start")
     except (KeyboardInterrupt, SystemExit):
         logger.info("Application received stop signal. Shutting down.")
     finally:

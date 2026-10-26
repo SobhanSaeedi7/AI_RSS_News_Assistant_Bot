@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy.exc import IntegrityError
 from telegram import Update
+from telegram.error import InvalidToken, TelegramError
 from telegram.ext import Application, ContextTypes
 
 from ai_rss_news_assistant.db.base import Base, Database
@@ -28,6 +29,7 @@ from ai_rss_news_assistant.db.repository import (
 from ai_rss_news_assistant.main import (
     NEWS_EMPTY,
     NEWS_MAX_MESSAGE_LENGTH,
+    _feed_display_name,
     add_feed_command,
     delete_feed_command,
     help_command,
@@ -201,10 +203,45 @@ async def test_add_feed_invalid_url() -> None:
 
 
 @pytest.mark.anyio
+async def test_add_feed_malformed_ipv6_url() -> None:
+    """Malformed IPv6 URLs are rejected before DB or network work."""
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=["http://[::1"])
+
+    with patch(
+        "ai_rss_news_assistant.main.get_user_by_telegram_id"
+    ) as mock_get_user, patch(
+        "ai_rss_news_assistant.main.normalize_url"
+    ) as mock_normalize:
+        await add_feed_command(update, context)
+
+    mock_get_user.assert_not_called()
+    mock_normalize.assert_not_called()
+    update.effective_message.reply_text.assert_called_once()
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "نامعتبر" in text
+
+
+@pytest.mark.anyio
 async def test_add_feed_missing_hostname() -> None:
     """Test /addfeed with URL missing hostname shows error."""
     update = _make_update()
     context = _make_context(AsyncMock(), args=["https://"])
+
+    await add_feed_command(update, context)
+
+    update.effective_message.reply_text.assert_called_once()
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "نامعتبر" in text
+
+
+@pytest.mark.anyio
+async def test_add_feed_rejects_embedded_credentials() -> None:
+    """Credentials in a feed URL must not be stored or logged."""
+    update = _make_update()
+    context = _make_context(
+        AsyncMock(), args=["https://user:password@example.com/feed.xml"]
+    )
 
     await add_feed_command(update, context)
 
@@ -688,6 +725,57 @@ def test_main_disposes_db_exactly_once_on_normal_shutdown() -> None:
         mock_loop.close.assert_called_once()
 
 
+def test_main_handles_invalid_token_without_leaking_token(caplog) -> None:
+    """InvalidToken is logged safely and the database is still disposed."""
+    mock_db = MagicMock()
+    mock_db.dispose = MagicMock(return_value=None)
+    mock_loop = MagicMock()
+    mock_application = MagicMock()
+    mock_application.initialize.return_value = None
+    mock_application.updater.running = False
+    mock_application.running = False
+
+    calls = 0
+
+    def run_until_complete(coro):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise InvalidToken(f"Invalid token: {_TEST_BOT_TOKEN}")
+
+    mock_loop.run_until_complete.side_effect = run_until_complete
+
+    with patch(
+        "ai_rss_news_assistant.main.Database", return_value=mock_db
+    ), patch(
+        "ai_rss_news_assistant.main.ApplicationBuilder"
+    ) as mock_builder, patch(
+        "ai_rss_news_assistant.main.setup_logging"
+    ), patch(
+        "ai_rss_news_assistant.main.asyncio.new_event_loop",
+        return_value=mock_loop,
+    ), patch(
+        "ai_rss_news_assistant.main.asyncio.set_event_loop"
+    ), patch.dict(
+        "os.environ",
+        {"BOT_TOKEN": _TEST_BOT_TOKEN, "DATABASE_URL": _TEST_DATABASE_URL},
+        clear=True,
+    ), caplog.at_level(
+        logging.ERROR, logger="ai_rss_news_assistant.main"
+    ):
+        mock_builder.return_value.token.return_value.build.return_value = (
+            mock_application
+        )
+
+        from ai_rss_news_assistant.main import main
+
+        main()
+
+    assert "rejected BOT_TOKEN" in caplog.text
+    assert _TEST_BOT_TOKEN not in caplog.text
+    mock_loop.close.assert_called_once()
+
+
 # --- /news command (real database) ---
 
 
@@ -823,6 +911,13 @@ async def test_news_command_falls_back_to_feed_hostname_without_title(tmp_path) 
         assert text.count("<b>") == text.count("</b>") == 1
     finally:
         await db.dispose()
+
+
+def test_feed_display_name_falls_back_for_malformed_feed_url() -> None:
+    """A malformed stored feed URL is shown raw instead of raising."""
+    feed = UserFeed(user_id=uuid.uuid4(), url="http://[::1", title=None)
+
+    assert _feed_display_name(feed) == "http://[::1"
 
 
 @pytest.mark.anyio

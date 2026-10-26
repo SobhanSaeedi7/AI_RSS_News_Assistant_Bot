@@ -22,6 +22,7 @@ from ai_rss_news_assistant.db.html_text_extractor import html_to_text
 from ai_rss_news_assistant.db.models import NewsItem, User, UserFeed
 from ai_rss_news_assistant.db.rss_ingestion import (
     _fetch_feed_content,
+    _safe_url_for_log,
     ingest_feeds_for_user,
 )
 
@@ -147,7 +148,7 @@ class NewsWorker:
                 _fetch_feed_content, url, self.fetch_timeout
             )
         except Exception:  # noqa: BLE001 - catch-all for transient fetch failures
-            logger.debug("Failed to fetch %s", url)
+            logger.debug("Failed to fetch full text from %s", _safe_url_for_log(url))
             return None
 
         return html_to_text(content.decode("utf-8", errors="replace"))
