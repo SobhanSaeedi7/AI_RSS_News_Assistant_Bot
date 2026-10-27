@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
-import os
 import signal
 import uuid
 from urllib.parse import urlsplit
@@ -25,7 +24,7 @@ from telegram.ext import (
 )
 
 from ai_rss_news_assistant.agent.answer import NewsAgent
-from ai_rss_news_assistant.config import Settings
+from ai_rss_news_assistant.config import BotSettings, WorkerSettings
 from ai_rss_news_assistant.contracts import AGENT_ERROR, AgentAnswer, AgentSource
 from ai_rss_news_assistant.db.base import Database
 from ai_rss_news_assistant.db.models import NewsItem, UserFeed
@@ -533,7 +532,7 @@ def _is_duplicate_feed_violation(exc: IntegrityError) -> bool:
 
 def main() -> None:
     """Initialize the bot process and run Telegram polling."""
-    settings = Settings()
+    settings = BotSettings()
     if settings.bot_token is None:
         raise ValueError("BOT_TOKEN is required for the bot service")
     setup_logging(settings.log_level)
@@ -609,14 +608,16 @@ def worker() -> None:
     it is configured. Without a token it still ingests news; delivery is
     disabled and a warning is logged.
     """
-    settings = Settings()
+    # The worker validates only the settings it needs: it can ingest and
+    # summarize without BOT_TOKEN, so a missing token warns instead of failing.
+    settings = WorkerSettings()
     setup_logging(settings.log_level)
     logger.info("worker process starting (app_env=%s)", settings.app_env)
 
     db = Database(settings.database_url)
-    poll_interval = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
-    fetch_full_text = os.environ.get("FETCH_FULL_TEXT", "true").lower() == "true"
-    fetch_timeout = int(os.environ.get("FETCH_TIMEOUT_SECONDS", "30"))
+    poll_interval = settings.poll_interval_seconds
+    fetch_full_text = settings.fetch_full_text
+    fetch_timeout = settings.fetch_timeout_seconds
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
