@@ -25,7 +25,7 @@ from ai_rss_news_assistant.db.rss_ingestion import (
     _safe_url_for_log,
     ingest_feeds_for_user,
 )
-from ai_rss_news_assistant.delivery import DeliveryRunner
+from ai_rss_news_assistant.worker.delivery import DeliveryRunner
 
 logger = logging.getLogger(__name__)
 

@@ -19,8 +19,8 @@ from telegram.error import BadRequest, Forbidden
 from ai_rss_news_assistant.db.base import Base
 from ai_rss_news_assistant.db.models import NewsDelivery, NewsItem, User, UserFeed
 from ai_rss_news_assistant.db.rss_worker import NewsWorker
-from ai_rss_news_assistant.delivery import DeliveryService, _source_name
-from ai_rss_news_assistant.summarization import SummarizationError
+from ai_rss_news_assistant.worker.delivery import DeliveryService, _source_name
+from ai_rss_news_assistant.worker.summarization import SummarizationError
 
 
 class FakeSummarizer:

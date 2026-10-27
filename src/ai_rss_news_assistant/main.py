@@ -45,10 +45,10 @@ from ai_rss_news_assistant.db.repository import (
 )
 from ai_rss_news_assistant.db.rss_worker import NewsWorker
 from ai_rss_news_assistant.db.url_normalization import normalize_url
-from ai_rss_news_assistant.delivery import DeliveryService
 from ai_rss_news_assistant.llm import build_chat_client
 from ai_rss_news_assistant.logging import setup_logging
-from ai_rss_news_assistant.summarization import build_summarizer
+from ai_rss_news_assistant.worker.delivery import DeliveryService
+from ai_rss_news_assistant.worker.summarization import build_summarizer
 
 logger = logging.getLogger(__name__)
 

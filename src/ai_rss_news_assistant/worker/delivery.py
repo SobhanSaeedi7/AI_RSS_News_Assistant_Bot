@@ -28,7 +28,7 @@ from ai_rss_news_assistant.db.repository import (
     get_user_by_id,
     list_undelivered_news_items_with_feed,
 )
-from ai_rss_news_assistant.summarization import SummarizationError, Summarizer
+from ai_rss_news_assistant.worker.summarization import SummarizationError, Summarizer
 
 logger = logging.getLogger(__name__)
 
