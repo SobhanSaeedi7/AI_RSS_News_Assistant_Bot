@@ -86,7 +86,7 @@ def test_worker_starts_without_bot_token(monkeypatch: pytest.MonkeyPatch) -> Non
     _database_env(monkeypatch)
     monkeypatch.delenv("BOT_TOKEN", raising=False)
     with patch(
-        "ai_rss_news_assistant.main.NewsWorker.run",
+        "ai_rss_news_assistant.worker.entrypoint.NewsWorker.run",
         new_callable=AsyncMock,
         return_value=None,
     ):
