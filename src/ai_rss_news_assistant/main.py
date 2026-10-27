@@ -46,6 +46,7 @@ from ai_rss_news_assistant.db.repository import (
 from ai_rss_news_assistant.db.url_normalization import normalize_url
 from ai_rss_news_assistant.llm import build_chat_client
 from ai_rss_news_assistant.logging import setup_logging
+from ai_rss_news_assistant.urls import parse_http_url
 from ai_rss_news_assistant.worker.delivery import DeliveryService
 from ai_rss_news_assistant.worker.service import NewsWorker
 from ai_rss_news_assistant.worker.summarization import build_summarizer
@@ -194,22 +195,13 @@ async def add_feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     url = args[0].strip()
 
-    # Parse before validation so malformed IPv6 input is handled as an invalid
-    # URL instead of surfacing a ValueError. Reject non-http(s) schemes and
-    # embedded credentials before normalization; credentials could otherwise
-    # be stored and appear in logs.
+    # Reject non-http(s) schemes and embedded credentials before normalization;
+    # credentials could otherwise be stored and appear in logs. The shared
+    # helper also turns malformed input (a broken IPv6 literal, for example)
+    # into an invalid URL instead of a ValueError escaping the handler.
     try:
-        parts = urlsplit(url)
+        parse_http_url(url)
     except ValueError:
-        await update.effective_message.reply_text(ADD_FEED_INVALID)
-        return
-
-    if (
-        parts.scheme.lower() not in ("http", "https")
-        or not parts.hostname
-        or parts.username is not None
-        or parts.password is not None
-    ):
         await update.effective_message.reply_text(ADD_FEED_INVALID)
         return
 

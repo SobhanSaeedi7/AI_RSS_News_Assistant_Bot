@@ -19,7 +19,6 @@ from ai_rss_news_assistant.agent import (
     INSUFFICIENT_EVIDENCE,
     NewsAgent,
     extract_terms,
-    safe_url,
 )
 from ai_rss_news_assistant.db.base import Base
 from ai_rss_news_assistant.db.models import NewsItem, User, UserFeed
@@ -410,24 +409,3 @@ async def test_search_escapes_like_wildcards() -> None:
         assert [item.title for item, _ in wildcard] == ["رشد 100% فروش"]
     finally:
         await engine.dispose()
-
-
-def test_safe_url_rejects_non_http_schemes() -> None:
-    assert safe_url("https://example.com/a") == "https://example.com/a"
-    assert safe_url("http://example.com/a") == "http://example.com/a"
-    assert safe_url("javascript:alert(1)") is None
-    assert safe_url("file:///etc/passwd") is None
-    assert safe_url(None) is None
-
-
-def test_safe_url_rejects_malformed_ipv6() -> None:
-    assert safe_url("http://[::1") is None
-
-
-def test_safe_url_rejects_unsafe_characters_and_credentials() -> None:
-    assert safe_url("https://example.com/a b") is None
-    assert safe_url("https://example.com/a\nb") is None
-    assert safe_url("https://example.com/a\tb") is None
-    assert safe_url("https://example.com/\x00") is None
-    assert safe_url("https://user:pass@example.com/") is None
-    assert safe_url("https://example.com/" + "a" * 2100) is None

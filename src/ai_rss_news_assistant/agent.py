@@ -23,11 +23,11 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from urllib.parse import urlsplit
 
 from ai_rss_news_assistant.db.models import NewsItem, UserFeed
 from ai_rss_news_assistant.db.repository import search_news_items
 from ai_rss_news_assistant.llm import ChatClient, LLMError
+from ai_rss_news_assistant.urls import safe_url
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,6 @@ MAX_SOURCES = 5
 MAX_SOURCE_EXCERPT_CHARS = 700
 MAX_QUESTION_CHARS = 500
 MAX_ANSWER_CHARS = 3500
-MAX_URL_LENGTH = 2048
 
 INSUFFICIENT_EVIDENCE = (
     "در خبرهای ذخیره‌شده شما اطلاعات کافی برای پاسخ به این سؤال پیدا نشد."
@@ -226,23 +225,6 @@ def extract_terms(question: str, *, limit: int = MAX_TERMS) -> list[str]:
         if len(terms) >= limit:
             break
     return terms
-
-
-def safe_url(url: str | None) -> str | None:
-    """Return ``url`` only when it is a safe, clickable http(s) URL."""
-    if not url or len(url) > MAX_URL_LENGTH:
-        return None
-    if any(char.isspace() or ord(char) < 0x20 or ord(char) == 0x7F for char in url):
-        return None
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
-        return None
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        return None
-    if parsed.username is not None or parsed.password is not None:
-        return None
-    return url
 
 
 def _clean(value: str | None) -> str:
