@@ -82,9 +82,7 @@ class AgentHTTPClient:
                     headers={"Authorization": f"Bearer {self._token}"},
                 )
         except httpx.TimeoutException:
-            logger.warning(
-                "Agent request timed out after %ss", self._timeout_seconds
-            )
+            logger.warning("Agent request timed out after %ss", self._timeout_seconds)
             return AgentAnswer.for_status("timeout")
         except httpx.HTTPError:
             logger.warning("Agent is unreachable")

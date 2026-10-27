@@ -84,9 +84,7 @@ def test_service_packages_respect_their_boundaries(package: str) -> None:
 
 def test_bot_never_imports_the_llm_client() -> None:
     """The bot must not be able to call a provider, directly or indirectly."""
-    sources = {
-        path.name: _imported_modules(path) for path in _package_sources("bot")
-    }
+    sources = {path.name: _imported_modules(path) for path in _package_sources("bot")}
 
     assert all(
         "ai_rss_news_assistant.llm" not in modules for modules in sources.values()

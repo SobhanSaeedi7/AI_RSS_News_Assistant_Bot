@@ -76,7 +76,9 @@ def _answer_payload(**overrides) -> dict[str, object]:
 
 @pytest.mark.anyio
 async def test_grounded_answer_is_parsed_with_its_sources() -> None:
-    transport = RecordingTransport(lambda request: _json_response(200, _answer_payload()))
+    transport = RecordingTransport(
+        lambda request: _json_response(200, _answer_payload())
+    )
     client = AgentHTTPClient(
         base_url=_BASE_URL, token=_TOKEN, timeout_seconds=40, transport=transport
     )
@@ -96,7 +98,9 @@ async def test_grounded_answer_is_parsed_with_its_sources() -> None:
 @pytest.mark.anyio
 async def test_request_carries_bearer_token_and_user_id() -> None:
     """The user id travels in the body and the token only in the header."""
-    transport = RecordingTransport(lambda request: _json_response(200, _answer_payload()))
+    transport = RecordingTransport(
+        lambda request: _json_response(200, _answer_payload())
+    )
     client = AgentHTTPClient(
         base_url=_BASE_URL, token=_TOKEN, timeout_seconds=40, transport=transport
     )
@@ -189,7 +193,9 @@ async def test_unreachable_agent_is_reported_as_unavailable() -> None:
         httpx.Response(
             status_code=200,
             headers={"content-type": "application/json"},
-            content=json.dumps({"status": "answered", "sources": "not a list"}).encode(),
+            content=json.dumps(
+                {"status": "answered", "sources": "not a list"}
+            ).encode(),
         ),
     ],
 )

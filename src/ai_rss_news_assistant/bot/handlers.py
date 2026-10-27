@@ -112,7 +112,9 @@ async def add_feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
-async def list_feeds_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def list_feeds_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle /listfeeds: list current user's feeds."""
     telegram_user = update.effective_user
     if telegram_user is None or update.effective_message is None:
@@ -137,7 +139,9 @@ async def list_feeds_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.effective_message.reply_text(message)
 
 
-async def delete_feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def delete_feed_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle /delfeed <id>: delete a feed owned by the current user."""
     telegram_user = update.effective_user
     if telegram_user is None or update.effective_message is None:
@@ -335,9 +339,7 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     db: Database = context.application.bot_data["db"]
     answerer = context.application.bot_data["agent"]
 
-    answer = await use_cases.answer_question(
-        db, answerer, telegram_user.id, question
-    )
+    answer = await use_cases.answer_question(db, answerer, telegram_user.id, question)
 
     for message in build_ask_messages(answer):
         try:

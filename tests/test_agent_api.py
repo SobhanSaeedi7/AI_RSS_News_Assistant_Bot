@@ -117,9 +117,7 @@ async def test_grounded_answer_returns_text_and_sources() -> None:
         answer=AgentAnswer(
             text="خلاصهٔ پاسخ [1]",
             sources=[
-                AgentSource(
-                    title="عنوان خبر", url="https://example.com/article/1"
-                )
+                AgentSource(title="عنوان خبر", url="https://example.com/article/1")
             ],
             grounded=True,
         )

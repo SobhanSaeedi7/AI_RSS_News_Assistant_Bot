@@ -104,9 +104,7 @@ def _normalized(value: str) -> str | None:
         return None
 
 
-async def add_feed(
-    db: Database, telegram_user_id: int, raw_url: str
-) -> FeedAddOutcome:
+async def add_feed(db: Database, telegram_user_id: int, raw_url: str) -> FeedAddOutcome:
     """Validate and store a feed for the user, reporting duplicates and rejects.
 
     Non-http(s) schemes and embedded credentials are rejected before anything is
@@ -156,9 +154,7 @@ async def list_user_feeds(db: Database, telegram_user_id: int) -> list[UserFeed]
         return list(await list_feeds(session, user.id))
 
 
-async def remove_feed(
-    db: Database, telegram_user_id: int, feed_id: uuid.UUID
-) -> bool:
+async def remove_feed(db: Database, telegram_user_id: int, feed_id: uuid.UUID) -> bool:
     """Delete one of the user's feeds; returns ``False`` if it is not theirs."""
     async with db.session() as session:
         user = await get_user_by_telegram_id(session, telegram_user_id)

@@ -113,9 +113,7 @@ def _current_answerer(request: Request) -> NewsAgent:
     return answerer
 
 
-_Credentials = Annotated[
-    HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
-]
+_Credentials = Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)]
 _Settings = Annotated[AgentSettings, Depends(_current_settings)]
 _Answerer = Annotated[NewsAgent, Depends(_current_answerer)]
 
