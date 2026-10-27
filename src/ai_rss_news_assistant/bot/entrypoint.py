@@ -1,10 +1,12 @@
 """Bot process entry point: Telegram polling and command wiring.
 
 The bot is the only service that talks to Telegram: it registers the command
-handlers and owns no retrieval or summarization of its own. Questions are
-answered by the object returned from :func:`_build_answerer`, which exposes the
-``answer(user_id, question)`` interface the handlers use; that seam is what the
-internal HTTP client plugs into.
+handlers and owns no retrieval, prompting, or summarization of its own.
+Questions are answered by the object returned from :func:`_build_answerer` -- the
+internal HTTP client for the agent service -- which exposes the
+``answer(user_id, question)`` interface the handlers use. Nothing in this package
+imports the agent's retrieval or LLM code, so the bot cannot call a provider
+directly.
 
 Startup validates only what the bot needs. A missing ``BOT_TOKEN`` fails with one
 explicit error, while missing agent or LLM settings degrade the single affected
@@ -20,7 +22,10 @@ import signal
 from telegram.error import InvalidToken
 from telegram.ext import ApplicationBuilder, CommandHandler
 
-from ai_rss_news_assistant.agent.answer import NewsAgent
+from ai_rss_news_assistant.bot.agent_client import (
+    AgentHTTPClient,
+    UnavailableAnswerer,
+)
 from ai_rss_news_assistant.bot.handlers import (
     _error_handler,
     add_feed_command,
@@ -35,17 +40,29 @@ from ai_rss_news_assistant.bot.handlers import (
 from ai_rss_news_assistant.bot.use_cases import Answerer
 from ai_rss_news_assistant.config import BotSettings
 from ai_rss_news_assistant.db.base import Database
-from ai_rss_news_assistant.llm import build_chat_client
 from ai_rss_news_assistant.logging import setup_logging
 
 logger = logging.getLogger(__name__)
 
 
-def _build_answerer(settings: BotSettings, db: Database) -> Answerer:
-    """Build the object /ask uses to answer questions for one user."""
-    return NewsAgent(
-        session_factory=db.session_factory,
-        client=build_chat_client(settings),
+def _build_answerer(settings: BotSettings) -> Answerer:
+    """Build the object /ask uses to answer questions for one user.
+
+    The bot reaches the agent over internal HTTP; without a configured token it
+    keeps running and /ask reports that answering is unavailable, so a missing
+    token cannot take the whole bot down.
+    """
+    if settings.agent_internal_token is None:
+        logger.warning(
+            "AGENT_INTERNAL_TOKEN is not set; /ask will report that AI answers "
+            "are unavailable"
+        )
+        return UnavailableAnswerer()
+
+    return AgentHTTPClient(
+        base_url=settings.agent_base_url,
+        token=settings.agent_internal_token,
+        timeout_seconds=settings.agent_timeout_seconds,
     )
 
 
@@ -66,7 +83,7 @@ def run_bot() -> None:
     try:
         application = ApplicationBuilder().token(settings.bot_token).build()
         application.bot_data["db"] = db
-        application.bot_data["agent"] = _build_answerer(settings, db)
+        application.bot_data["agent"] = _build_answerer(settings)
 
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
