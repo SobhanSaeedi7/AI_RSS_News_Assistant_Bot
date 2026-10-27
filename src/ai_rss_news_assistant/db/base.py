@@ -1,10 +1,12 @@
 """Database engine, session factory, and declarative base.
 
 The :class:`Database` class owns a SQLAlchemy async engine and session factory.
-Application entry points (``bot`` and ``worker``) initialize a single
-:class:`Database` from the ``DATABASE_URL`` setting and share it across the
-process. Tests can construct independent :class:`Database` instances against
-in-memory or test databases without affecting the application instance.
+Each service entry point (``bot``, ``worker``, ``agent``) constructs one from the
+``DATABASE_URL`` setting and passes it -- or its session factory -- explicitly to
+the objects that need it. There is deliberately no module-level database: a
+shared global would let a process-wide instance leak between services and make
+tests depend on import order. Tests construct independent :class:`Database`
+instances against in-memory or file-backed databases.
 """
 
 from __future__ import annotations
@@ -66,44 +68,3 @@ class Database:
     async def dispose(self) -> None:
         """Dispose the engine and release all pooled connections."""
         await self._engine.dispose()
-
-
-# Module-level application database instance.
-_db: Database | None = None
-
-
-def init_database(database_url: str) -> Database:
-    """Initialize the module-level database from a DATABASE_URL.
-
-    Safe to call once at application startup. Returns the :class:`Database`
-    instance so callers can keep a reference.
-    """
-    global _db
-    _db = Database(database_url)
-    return _db
-
-
-def get_database() -> Database:
-    """Return the module-level database, raising if not initialized."""
-    if _db is None:
-        raise RuntimeError("Database is not initialized. Call init_database() first.")
-    return _db
-
-
-@contextlib.asynccontextmanager
-async def get_session() -> AsyncIterator[AsyncSession]:
-    """Yield a session from the module-level database (DI style).
-
-    Intended for use as a FastAPI/PTB dependency or context manager.
-    """
-    db = get_database()
-    async with db.session() as session:
-        yield session
-
-
-async def dispose_database() -> None:
-    """Dispose the module-level database engine."""
-    global _db
-    if _db is not None:
-        await _db.dispose()
-        _db = None

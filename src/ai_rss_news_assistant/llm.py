@@ -5,6 +5,10 @@ The same client is used by the worker (news summarization) and by the bot
 bounded, sanitized subset of the provider's structured error (``type``,
 ``code``, ``message``) are surfaced; request headers, request bodies, and the
 full response body are never logged or returned to callers.
+
+Every failure is raised as :class:`LLMError` with a ``kind`` of ``"timeout"``
+or ``"provider"``, so callers can react to a slow provider without parsing the
+message text.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ import re
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Literal, Protocol
 
 from ai_rss_news_assistant.config import Settings
 
@@ -33,8 +37,22 @@ _CREDENTIAL_RE = re.compile(
 )
 
 
+LLMErrorKind = Literal["timeout", "provider"]
+
+
 class LLMError(Exception):
-    """Raised when a chat completion cannot be produced."""
+    """Raised when a chat completion cannot be produced.
+
+    ``kind`` classifies the failure so callers do not have to parse the
+    message: ``"timeout"`` means the provider did not answer within the
+    configured timeout, and ``"provider"`` covers every other cause (HTTP
+    errors, connection failures, unusable responses). Nothing but a bounded
+    reason is stored, so no key or header can leak through it.
+    """
+
+    def __init__(self, message: str, *, kind: LLMErrorKind = "provider") -> None:
+        super().__init__(message)
+        self.kind: LLMErrorKind = kind
 
 
 def _sanitize_error_text(value: object, api_key: str, limit: int) -> str:
@@ -69,6 +87,18 @@ def _provider_error_fields(body: bytes) -> dict[str, str]:
             continue
         fields[name] = str(value)
     return fields
+
+
+def _timed_out(exc: BaseException) -> bool:
+    """Return True when a urllib failure was caused by the request timeout.
+
+    ``urlopen`` raises :class:`TimeoutError` (``socket.timeout``) directly when
+    the connection or a read times out, and wraps a timeout during the request
+    in ``URLError(reason=TimeoutError(...))``, so both shapes are checked.
+    """
+    if isinstance(exc, TimeoutError):
+        return True
+    return isinstance(getattr(exc, "reason", None), TimeoutError)
 
 
 def _http_error_message(exc: urllib.error.HTTPError, api_key: str) -> str:
@@ -167,7 +197,12 @@ class OpenAICompatibleClient:
             # structured error. Headers, request bodies, and the full response
             # body are never logged or returned.
             raise LLMError(_http_error_message(exc, self._api_key)) from None
-        except Exception:  # noqa: BLE001 - normalise urllib failures
+        except Exception as exc:  # noqa: BLE001 - normalise urllib failures
+            if _timed_out(exc):
+                raise LLMError(
+                    f"LLM request timed out after {self._timeout_seconds}s",
+                    kind="timeout",
+                ) from None
             raise LLMError("LLM request failed") from None
 
         try:

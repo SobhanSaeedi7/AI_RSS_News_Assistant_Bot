@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ai_rss_news_assistant.db.models import NewsItem
 from ai_rss_news_assistant.db.repository import create_news_item, list_feeds
 from ai_rss_news_assistant.db.url_normalization import normalize_url
+from ai_rss_news_assistant.urls import parse_http_url
 
 logger = logging.getLogger(__name__)
 
@@ -95,22 +96,17 @@ def _is_blocked_host(hostname: str) -> bool:
 def _validate_url(url: str) -> None:
     """Validate URL scheme and host for SSRF protection.
 
-    Raises ValueError if the URL scheme is not http/https or the host
-    resolves to a blocked/private IP address.
+    The scheme, hostname, and embedded-credential checks come from the shared
+    URL helpers, so the bot rejects exactly the same inputs when a user adds a
+    feed. Only the address blocking below is specific to outbound fetching.
+
+    Raises ValueError if the URL is not http(s) or the host resolves to a
+    blocked/private IP address.
     """
-    parts = urllib.request.urlsplit(url)
-    scheme = parts.scheme.lower()
-    if scheme not in ("http", "https"):
-        raise ValueError(f"Unsupported URL scheme: {scheme}")
+    parsed = parse_http_url(url)
 
-    hostname = parts.hostname
-    if not hostname:
-        raise ValueError("URL must have a hostname")
-    if parts.username is not None or parts.password is not None:
-        raise ValueError("URLs with embedded credentials are not allowed")
-
-    if _is_blocked_host(hostname):
-        raise ValueError(f"Access to {hostname} is not allowed")
+    if _is_blocked_host(parsed.hostname):
+        raise ValueError(f"Access to {parsed.hostname} is not allowed")
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):

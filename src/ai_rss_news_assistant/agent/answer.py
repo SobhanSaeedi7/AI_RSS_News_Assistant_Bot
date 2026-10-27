@@ -1,8 +1,9 @@
 """Grounded question answering over a user's stored news.
 
-The agent answers only from news rows owned by the requesting user. Retrieval
-happens in the repository layer with an ownership-scoped query; the LLM never
-receives another user's data and has no tools, web access, or database access.
+The answer service answers only from news rows owned by the requesting user.
+Retrieval happens in the repository layer with an ownership-scoped query; the
+LLM never receives another user's data and has no tools, web access, or
+database access.
 
 Design notes:
 
@@ -14,6 +15,9 @@ Design notes:
   make injection impossible, but the model has no tools and no other user's
   data, so the blast radius is limited to the wording of the answer.
 * ``/ask`` is stateless: no conversation history is stored or reused.
+* The service never raises for an LLM failure. It returns an answer whose
+  ``status`` says what happened, and the HTTP layer and the bot each map that
+  status without reading exception text.
 """
 
 from __future__ import annotations
@@ -21,29 +25,24 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
-from urllib.parse import urlsplit
 
+from ai_rss_news_assistant.agent.errors import answer_status_for_llm_error
+from ai_rss_news_assistant.contracts import (
+    MAX_QUESTION_CHARS,
+    AgentAnswer,
+    AgentSource,
+)
 from ai_rss_news_assistant.db.models import NewsItem, UserFeed
 from ai_rss_news_assistant.db.repository import search_news_items
 from ai_rss_news_assistant.llm import ChatClient, LLMError
+from ai_rss_news_assistant.urls import safe_url
 
 logger = logging.getLogger(__name__)
 
 MAX_TERMS = 8
 MAX_SOURCES = 5
 MAX_SOURCE_EXCERPT_CHARS = 700
-MAX_QUESTION_CHARS = 500
 MAX_ANSWER_CHARS = 3500
-MAX_URL_LENGTH = 2048
-
-INSUFFICIENT_EVIDENCE = (
-    "در خبرهای ذخیره‌شده شما اطلاعات کافی برای پاسخ به این سؤال پیدا نشد."
-)
-AGENT_UNAVAILABLE = "قابلیت پاسخ هوشمند در حال حاضر فعال نیست."
-AGENT_ERROR = "در حال حاضر امکان پاسخ‌دهی نیست. لطفاً کمی بعد دوباره تلاش کنید."
-EMPTY_QUESTION = "لطفاً سؤال خود را بنویسید."
 
 _SYSTEM_PROMPT = (
     "You answer questions about news articles for a Telegram bot. "
@@ -196,25 +195,6 @@ _STOPWORDS = {
 }
 
 
-@dataclass(frozen=True)
-class AgentSource:
-    """A stored news item cited by an agent answer."""
-
-    title: str
-    url: str | None
-    feed_title: str | None = None
-    published_at: datetime | None = None
-
-
-@dataclass(frozen=True)
-class AgentAnswer:
-    """The result of one question, ready to be rendered by the bot."""
-
-    text: str
-    sources: list[AgentSource] = field(default_factory=list)
-    grounded: bool = False
-
-
 def extract_terms(question: str, *, limit: int = MAX_TERMS) -> list[str]:
     """Return distinct, meaningful search terms from a question."""
     terms: list[str] = []
@@ -226,23 +206,6 @@ def extract_terms(question: str, *, limit: int = MAX_TERMS) -> list[str]:
         if len(terms) >= limit:
             break
     return terms
-
-
-def safe_url(url: str | None) -> str | None:
-    """Return ``url`` only when it is a safe, clickable http(s) URL."""
-    if not url or len(url) > MAX_URL_LENGTH:
-        return None
-    if any(char.isspace() or ord(char) < 0x20 or ord(char) == 0x7F for char in url):
-        return None
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
-        return None
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        return None
-    if parsed.username is not None or parsed.password is not None:
-        return None
-    return url
 
 
 def _clean(value: str | None) -> str:
@@ -309,7 +272,7 @@ class NewsAgent:
     async def answer(self, user_id: uuid.UUID, question: str) -> AgentAnswer:
         question = " ".join(question.split())[:MAX_QUESTION_CHARS]
         if not question:
-            return AgentAnswer(text=EMPTY_QUESTION)
+            return AgentAnswer.for_status("empty_question")
 
         terms = extract_terms(question)
         async with self._session_factory() as session:
@@ -320,10 +283,10 @@ class NewsAgent:
         if not rows:
             # No evidence means no LLM call: a model cannot ground an answer
             # without sources, so asking it would only invite invention.
-            return AgentAnswer(text=INSUFFICIENT_EVIDENCE)
+            return AgentAnswer.for_status("insufficient_evidence")
 
         if self._client is None:
-            return AgentAnswer(text=AGENT_UNAVAILABLE)
+            return AgentAnswer.for_status("unavailable")
 
         try:
             text = await self._client.complete(
@@ -333,13 +296,15 @@ class NewsAgent:
             )
         except LLMError as exc:
             logger.warning("Agent LLM request failed: %s", exc)
-            return AgentAnswer(text=AGENT_ERROR)
+            # The classification decides the status; the message is never parsed.
+            return AgentAnswer.for_status(answer_status_for_llm_error(exc.kind))
 
         if not text.strip():
-            return AgentAnswer(text=AGENT_ERROR)
+            return AgentAnswer.for_status("provider_error")
 
         return AgentAnswer(
             text=text[:MAX_ANSWER_CHARS],
             sources=[_source_from_row(item, feed) for item, feed in rows],
             grounded=True,
+            status="answered",
         )

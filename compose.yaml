@@ -1,6 +1,6 @@
-# Extension field: one image definition shared by the two long-running
+# Extension field: one image definition shared by the three long-running
 # services and the one-off migration job. Declaring the build once keeps the
-# three services from drifting apart and gives them a single image tag.
+# services from drifting apart and gives them a single image tag.
 x-app: &app
   build:
     context: .
@@ -32,17 +32,23 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      # Wait for the agent's liveness check before polling starts, so early
+      # /ask requests are not answered with "unavailable".
+      agent:
+        condition: service_healthy
     environment:
       APP_ENV: ${APP_ENV:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ai_rss_news}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:-ai_rss_news}
       BOT_TOKEN: ${BOT_TOKEN:?BOT_TOKEN is required}
-      # Optional: without an API key /ask reports that AI answers are disabled.
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.avalai.ir/v1}
-      LLM_MODEL: ${LLM_MODEL:-gpt-6-luna}
-      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
-    command: ["main"]
+      # The bot answers questions over the agent's internal HTTP API. It never
+      # calls a provider itself, so no LLM_* settings are needed here.
+      AGENT_BASE_URL: ${AGENT_BASE_URL:-http://agent:8000}
+      AGENT_INTERNAL_TOKEN: ${AGENT_INTERNAL_TOKEN:-}
+      # Must stay larger than LLM_TIMEOUT_SECONDS so the agent can report its
+      # own provider timeout instead of the bot timing out first.
+      AGENT_TIMEOUT_SECONDS: ${AGENT_TIMEOUT_SECONDS:-40}
+    command: ["bot"]
     restart: unless-stopped
 
   worker:
@@ -69,6 +75,46 @@ services:
       FETCH_FULL_TEXT: ${FETCH_FULL_TEXT:-true}
       FETCH_TIMEOUT_SECONDS: ${FETCH_TIMEOUT_SECONDS:-30}
     command: ["worker"]
+    restart: unless-stopped
+
+  # Internal answer service. It is reachable only on the Compose network: no
+  # ports are published, so it cannot be called from the host or the internet.
+  # Every request must present AGENT_INTERNAL_TOKEN; when the token is unset the
+  # API refuses all requests (503) rather than serving unauthenticated traffic.
+  # The bot uses the same token value.
+  agent:
+    <<: *app
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ai_rss_news}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:-ai_rss_news}
+      AGENT_INTERNAL_TOKEN: ${AGENT_INTERNAL_TOKEN:-}
+      AGENT_HOST: 0.0.0.0
+      AGENT_PORT: ${AGENT_PORT:-8000}
+      # The agent owns the provider call for answers; without a key it reports
+      # that answering is unavailable.
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.avalai.ir/v1}
+      LLM_MODEL: ${LLM_MODEL:-gpt-6-luna}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
+    command: ["agent"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${AGENT_PORT:-8000}/health', timeout=3).read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
 
   # One-off migration service. Runs `alembic upgrade head` against the `db`

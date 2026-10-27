@@ -18,26 +18,7 @@ from telegram import Update
 from telegram.error import InvalidToken, TelegramError
 from telegram.ext import Application, ContextTypes
 
-from ai_rss_news_assistant.agent import AgentAnswer, AgentSource
-from ai_rss_news_assistant.db.base import Base, Database
-from ai_rss_news_assistant.db.models import User, UserFeed
-from ai_rss_news_assistant.db.repository import (
-    create_feed,
-    create_news_item,
-    create_user,
-    get_user_by_telegram_id,
-)
-from ai_rss_news_assistant.main import (
-    AGENT_ERROR,
-    ASK_TOO_LONG,
-    ASK_USAGE,
-    DELIVERY_OFF,
-    DELIVERY_ON,
-    DELIVERY_STATUS_OFF,
-    DELIVERY_STATUS_ON,
-    DELIVERY_USAGE,
-    NEWS_EMPTY,
-    NEWS_MAX_MESSAGE_LENGTH,
+from ai_rss_news_assistant.bot.handlers import (
     _feed_display_name,
     add_feed_command,
     ask_command,
@@ -48,6 +29,26 @@ from ai_rss_news_assistant.main import (
     list_feeds_command,
     news_command,
     start_command,
+)
+from ai_rss_news_assistant.bot.messages import (
+    ASK_TOO_LONG,
+    ASK_USAGE,
+    DELIVERY_OFF,
+    DELIVERY_ON,
+    DELIVERY_STATUS_OFF,
+    DELIVERY_STATUS_ON,
+    DELIVERY_USAGE,
+    NEWS_EMPTY,
+    NEWS_MAX_MESSAGE_LENGTH,
+)
+from ai_rss_news_assistant.contracts import AGENT_ERROR, AgentAnswer, AgentSource
+from ai_rss_news_assistant.db.base import Base, Database
+from ai_rss_news_assistant.db.models import User, UserFeed
+from ai_rss_news_assistant.db.repository import (
+    create_feed,
+    create_news_item,
+    create_user,
+    get_user_by_telegram_id,
 )
 
 _TEST_TELEGRAM_USER_ID = 123456789
@@ -103,10 +104,10 @@ async def test_start_command_creates_new_user() -> None:
     mock_session = _mock_db_session(context.application.bot_data["db"])
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=None,
     ) as mock_get, patch(
-        "ai_rss_news_assistant.main.create_user",
+        "ai_rss_news_assistant.bot.use_cases.create_user",
         return_value=MagicMock(spec=User),
     ) as mock_create:
         await start_command(update, context)
@@ -130,10 +131,10 @@ async def test_start_command_existing_user() -> None:
     mock_session = _mock_db_session(context.application.bot_data["db"])
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=existing_user,
     ) as mock_get, patch(
-        "ai_rss_news_assistant.main.create_user",
+        "ai_rss_news_assistant.bot.use_cases.create_user",
     ) as mock_create:
         await start_command(update, context)
 
@@ -173,13 +174,13 @@ async def test_add_feed_creates_new_feed() -> None:
     new_feed.title = "Example Feed"
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=MagicMock(spec=User),
     ), patch(
-        "ai_rss_news_assistant.main.list_feeds",
+        "ai_rss_news_assistant.bot.use_cases.list_feeds",
         return_value=[],
     ), patch(
-        "ai_rss_news_assistant.main.create_feed",
+        "ai_rss_news_assistant.bot.use_cases.create_feed",
         return_value=new_feed,
     ):
         await add_feed_command(update, context)
@@ -223,9 +224,9 @@ async def test_add_feed_malformed_ipv6_url() -> None:
     context = _make_context(AsyncMock(), args=["http://[::1"])
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id"
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id"
     ) as mock_get_user, patch(
-        "ai_rss_news_assistant.main.normalize_url"
+        "ai_rss_news_assistant.bot.use_cases.normalize_url"
     ) as mock_normalize:
         await add_feed_command(update, context)
 
@@ -276,10 +277,10 @@ async def test_add_feed_duplicate() -> None:
     existing_feed.url = "https://example.com/feed.xml"
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=MagicMock(spec=User),
     ), patch(
-        "ai_rss_news_assistant.main.list_feeds",
+        "ai_rss_news_assistant.bot.use_cases.list_feeds",
         return_value=[existing_feed],
     ):
         await add_feed_command(update, context)
@@ -303,13 +304,13 @@ async def test_add_feed_integrity_error() -> None:
     exc = IntegrityError("duplicate key violates unique constraint", None, orig)
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=MagicMock(spec=User),
     ), patch(
-        "ai_rss_news_assistant.main.list_feeds",
+        "ai_rss_news_assistant.bot.use_cases.list_feeds",
         return_value=[],
     ), patch(
-        "ai_rss_news_assistant.main.create_feed",
+        "ai_rss_news_assistant.bot.use_cases.create_feed",
         side_effect=exc,
     ):
         await add_feed_command(update, context)
@@ -334,13 +335,13 @@ async def test_add_feed_unique_violation_wrong_constraint_not_duplicate() -> Non
     exc = IntegrityError("duplicate key violates unique constraint", None, orig)
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=MagicMock(spec=User),
     ), patch(
-        "ai_rss_news_assistant.main.list_feeds",
+        "ai_rss_news_assistant.bot.use_cases.list_feeds",
         return_value=[],
     ), patch(
-        "ai_rss_news_assistant.main.create_feed",
+        "ai_rss_news_assistant.bot.use_cases.create_feed",
         side_effect=exc,
     ), pytest.raises(IntegrityError):
         await add_feed_command(update, context)
@@ -365,13 +366,13 @@ async def test_add_feed_unique_violation_returns_duplicate() -> None:
     exc = IntegrityError("duplicate key violates unique constraint", None, orig)
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=MagicMock(spec=User),
     ), patch(
-        "ai_rss_news_assistant.main.list_feeds",
+        "ai_rss_news_assistant.bot.use_cases.list_feeds",
         return_value=[],
     ), patch(
-        "ai_rss_news_assistant.main.create_feed",
+        "ai_rss_news_assistant.bot.use_cases.create_feed",
         side_effect=exc,
     ):
         await add_feed_command(update, context)
@@ -395,13 +396,13 @@ async def test_add_feed_unrelated_integrity_error_not_duplicate() -> None:
     exc = IntegrityError("foreign key constraint violated", None, orig)
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=MagicMock(spec=User),
     ), patch(
-        "ai_rss_news_assistant.main.list_feeds",
+        "ai_rss_news_assistant.bot.use_cases.list_feeds",
         return_value=[],
     ), patch(
-        "ai_rss_news_assistant.main.create_feed",
+        "ai_rss_news_assistant.bot.use_cases.create_feed",
         side_effect=exc,
     ), pytest.raises(IntegrityError):
         await add_feed_command(update, context)
@@ -426,13 +427,13 @@ async def test_add_feed_session_rolled_back_after_integrity_error() -> None:
     exc = IntegrityError("duplicate key violates unique constraint", None, orig)
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=MagicMock(spec=User),
     ), patch(
-        "ai_rss_news_assistant.main.list_feeds",
+        "ai_rss_news_assistant.bot.use_cases.list_feeds",
         return_value=[],
     ), patch(
-        "ai_rss_news_assistant.main.create_feed",
+        "ai_rss_news_assistant.bot.use_cases.create_feed",
         side_effect=exc,
     ):
         await add_feed_command(update, context)
@@ -456,13 +457,13 @@ async def test_add_feed_concurrent_safety_via_unique_constraint() -> None:
     exc = IntegrityError("duplicate key violates unique constraint", None, orig)
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=MagicMock(spec=User),
     ), patch(
-        "ai_rss_news_assistant.main.list_feeds",
+        "ai_rss_news_assistant.bot.use_cases.list_feeds",
         return_value=[],
     ), patch(
-        "ai_rss_news_assistant.main.create_feed",
+        "ai_rss_news_assistant.bot.use_cases.create_feed",
         side_effect=exc,
     ):
         await add_feed_command(update, context)
@@ -481,10 +482,10 @@ async def test_list_feeds_empty() -> None:
     _mock_db_session(context.application.bot_data["db"])
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=MagicMock(spec=User),
     ), patch(
-        "ai_rss_news_assistant.main.list_feeds",
+        "ai_rss_news_assistant.bot.use_cases.list_feeds",
         return_value=[],
     ):
         await list_feeds_command(update, context)
@@ -515,10 +516,10 @@ async def test_list_feeds_with_feeds() -> None:
     feed2.active = False
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=MagicMock(spec=User),
     ), patch(
-        "ai_rss_news_assistant.main.list_feeds",
+        "ai_rss_news_assistant.bot.use_cases.list_feeds",
         return_value=[feed1, feed2],
     ):
         await list_feeds_command(update, context)
@@ -546,10 +547,10 @@ async def test_list_feeds_splits_long_output() -> None:
     feed.active = True
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=MagicMock(spec=User),
     ), patch(
-        "ai_rss_news_assistant.main.list_feeds",
+        "ai_rss_news_assistant.bot.use_cases.list_feeds",
         return_value=[feed, feed, feed],
     ):
         await list_feeds_command(update, context)
@@ -569,10 +570,10 @@ async def test_delete_feed_success() -> None:
     _mock_db_session(context.application.bot_data["db"])
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=MagicMock(spec=User),
     ), patch(
-        "ai_rss_news_assistant.main.delete_feed",
+        "ai_rss_news_assistant.bot.use_cases.delete_feed",
         return_value=True,
     ):
         await delete_feed_command(update, context)
@@ -592,10 +593,10 @@ async def test_delete_feed_not_found() -> None:
     _mock_db_session(context.application.bot_data["db"])
 
     with patch(
-        "ai_rss_news_assistant.main.get_user_by_telegram_id",
+        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
         return_value=MagicMock(spec=User),
     ), patch(
-        "ai_rss_news_assistant.main.delete_feed",
+        "ai_rss_news_assistant.bot.use_cases.delete_feed",
         return_value=False,
     ):
         await delete_feed_command(update, context)
@@ -636,8 +637,10 @@ def test_error_handler_does_not_leak_secrets(caplog) -> None:
     context = MagicMock()
     context.error = Exception("database connection failed")
 
-    with caplog.at_level(logging.ERROR, logger="ai_rss_news_assistant.main"):
-        from ai_rss_news_assistant.main import _error_handler
+    with caplog.at_level(
+        logging.ERROR, logger="ai_rss_news_assistant.bot.handlers"
+    ):
+        from ai_rss_news_assistant.bot.handlers import _error_handler
 
         asyncio.run(_error_handler(None, context))
 
@@ -653,14 +656,14 @@ def test_main_disposes_db_on_application_build_failure() -> None:
     mock_loop = MagicMock()
 
     with patch(
-        "ai_rss_news_assistant.main.Database", return_value=mock_db
+        "ai_rss_news_assistant.bot.entrypoint.Database", return_value=mock_db
     ), patch(
-        "ai_rss_news_assistant.main.ApplicationBuilder"
+        "ai_rss_news_assistant.bot.entrypoint.ApplicationBuilder"
     ) as mock_builder, patch(
-        "ai_rss_news_assistant.main.asyncio.new_event_loop",
+        "ai_rss_news_assistant.bot.entrypoint.asyncio.new_event_loop",
         return_value=mock_loop,
     ), patch(
-        "ai_rss_news_assistant.main.asyncio.set_event_loop"
+        "ai_rss_news_assistant.bot.entrypoint.asyncio.set_event_loop"
     ), patch.dict(
         "os.environ",
         {"BOT_TOKEN": _TEST_BOT_TOKEN, "DATABASE_URL": _TEST_DATABASE_URL},
@@ -671,9 +674,9 @@ def test_main_disposes_db_on_application_build_failure() -> None:
         )
 
         with pytest.raises(RuntimeError, match="build failed"):
-            from ai_rss_news_assistant.main import main
+            from ai_rss_news_assistant.bot.entrypoint import run_bot
 
-            main()
+            run_bot()
 
         dispose_coroutines = [
             call[0][0]
@@ -694,14 +697,14 @@ def test_main_disposes_db_on_polling_failure() -> None:
     mock_application.running = False
 
     with patch(
-        "ai_rss_news_assistant.main.Database", return_value=mock_db
+        "ai_rss_news_assistant.bot.entrypoint.Database", return_value=mock_db
     ), patch(
-        "ai_rss_news_assistant.main.ApplicationBuilder"
+        "ai_rss_news_assistant.bot.entrypoint.ApplicationBuilder"
     ) as mock_builder, patch(
-        "ai_rss_news_assistant.main.asyncio.new_event_loop",
+        "ai_rss_news_assistant.bot.entrypoint.asyncio.new_event_loop",
         return_value=mock_loop,
     ), patch(
-        "ai_rss_news_assistant.main.asyncio.set_event_loop"
+        "ai_rss_news_assistant.bot.entrypoint.asyncio.set_event_loop"
     ), patch.dict(
         "os.environ",
         {"BOT_TOKEN": _TEST_BOT_TOKEN, "DATABASE_URL": _TEST_DATABASE_URL},
@@ -713,9 +716,9 @@ def test_main_disposes_db_on_polling_failure() -> None:
         mock_loop.run_forever.side_effect = RuntimeError("polling failed")
 
         with pytest.raises(RuntimeError, match="polling failed"):
-            from ai_rss_news_assistant.main import main
+            from ai_rss_news_assistant.bot.entrypoint import run_bot
 
-            main()
+            run_bot()
 
         dispose_coroutines = [
             call[0][0]
@@ -736,14 +739,14 @@ def test_main_disposes_db_exactly_once_on_normal_shutdown() -> None:
     mock_application.running = False
 
     with patch(
-        "ai_rss_news_assistant.main.Database", return_value=mock_db
+        "ai_rss_news_assistant.bot.entrypoint.Database", return_value=mock_db
     ), patch(
-        "ai_rss_news_assistant.main.ApplicationBuilder"
+        "ai_rss_news_assistant.bot.entrypoint.ApplicationBuilder"
     ) as mock_builder, patch(
-        "ai_rss_news_assistant.main.asyncio.new_event_loop",
+        "ai_rss_news_assistant.bot.entrypoint.asyncio.new_event_loop",
         return_value=mock_loop,
     ), patch(
-        "ai_rss_news_assistant.main.asyncio.set_event_loop"
+        "ai_rss_news_assistant.bot.entrypoint.asyncio.set_event_loop"
     ), patch.dict(
         "os.environ",
         {"BOT_TOKEN": _TEST_BOT_TOKEN, "DATABASE_URL": _TEST_DATABASE_URL},
@@ -754,9 +757,9 @@ def test_main_disposes_db_exactly_once_on_normal_shutdown() -> None:
         )
         mock_loop.run_forever.side_effect = KeyboardInterrupt()
 
-        from ai_rss_news_assistant.main import main
+        from ai_rss_news_assistant.bot.entrypoint import run_bot
 
-        main()
+        run_bot()
 
         dispose_coroutines = [
             call[0][0]
@@ -788,30 +791,30 @@ def test_main_handles_invalid_token_without_leaking_token(caplog) -> None:
     mock_loop.run_until_complete.side_effect = run_until_complete
 
     with patch(
-        "ai_rss_news_assistant.main.Database", return_value=mock_db
+        "ai_rss_news_assistant.bot.entrypoint.Database", return_value=mock_db
     ), patch(
-        "ai_rss_news_assistant.main.ApplicationBuilder"
+        "ai_rss_news_assistant.bot.entrypoint.ApplicationBuilder"
     ) as mock_builder, patch(
-        "ai_rss_news_assistant.main.setup_logging"
+        "ai_rss_news_assistant.bot.entrypoint.setup_logging"
     ), patch(
-        "ai_rss_news_assistant.main.asyncio.new_event_loop",
+        "ai_rss_news_assistant.bot.entrypoint.asyncio.new_event_loop",
         return_value=mock_loop,
     ), patch(
-        "ai_rss_news_assistant.main.asyncio.set_event_loop"
+        "ai_rss_news_assistant.bot.entrypoint.asyncio.set_event_loop"
     ), patch.dict(
         "os.environ",
         {"BOT_TOKEN": _TEST_BOT_TOKEN, "DATABASE_URL": _TEST_DATABASE_URL},
         clear=True,
     ), caplog.at_level(
-        logging.ERROR, logger="ai_rss_news_assistant.main"
+        logging.ERROR, logger="ai_rss_news_assistant.bot.entrypoint"
     ):
         mock_builder.return_value.token.return_value.build.return_value = (
             mock_application
         )
 
-        from ai_rss_news_assistant.main import main
+        from ai_rss_news_assistant.bot.entrypoint import run_bot
 
-        main()
+        run_bot()
 
     assert "rejected BOT_TOKEN" in caplog.text
     assert _TEST_BOT_TOKEN not in caplog.text
@@ -1327,7 +1330,7 @@ def test_build_ask_messages_omits_sources_when_not_grounded() -> None:
 
 
 def test_split_message_never_breaks_html_entities() -> None:
-    from ai_rss_news_assistant.main import _split_message
+    from ai_rss_news_assistant.bot.handlers import _split_message
 
     word = "&amp;" * 100
     chunks = _split_message(word, 17)
