@@ -190,6 +190,10 @@ still ingest news with automatic delivery disabled.
    `migrate` service, and starts `bot` and `worker` only after migrations
    succeed. Use `-d` to run in the background.
 
+   `bot`, `worker`, and `migrate` all run the same image, defined once in
+   `compose.yaml` and tagged `ai-rss-news-assistant:local`, so the three
+   services cannot drift apart.
+
 3. Check status and follow logs:
 
    ```sh
@@ -217,6 +221,17 @@ still ingest news with automatic delivery disabled.
 `docker compose down` keeps the named PostgreSQL volume. Do not add `-v`
 unless you intentionally want to delete stored data. PostgreSQL data persists
 in the named volume `db_data`.
+
+### Container image
+
+* Dependencies are installed from `uv.lock` with `uv export --locked --no-dev`.
+  Development dependencies, the exporter tool, and its temporary requirement
+  list are not part of the final image.
+* The container runs as the unprivileged `appuser` (uid 10001). The application
+  reads its own files and writes only to PostgreSQL, so it needs no writable
+  path inside the image.
+* Logs are written to stdout unbuffered, so `docker compose logs` and the
+  default Docker logging driver capture them without extra configuration.
 
 ## Database migrations
 
@@ -323,6 +338,22 @@ test suite does not require PostgreSQL, Docker, a bot token, or an LLM key.
 * **`migrate` fails or `bot`/`worker` never start** — inspect
   `docker compose logs migrate` and confirm `POSTGRES_PASSWORD` is set. The
   application services deliberately wait for a successful migration.
+* **`docker compose ps` shows `db` as `healthy` but `bot`/`worker` as plain
+  `running`** — that is expected. The application services expose no endpoint to
+  probe, so they deliberately declare no healthcheck; the restart policy, the
+  container state, and `docker compose logs -f bot worker` are the signals to
+  use.
+* **A `bot` container that keeps restarting** — a fatal configuration problem
+  (for example a rejected `BOT_TOKEN`) logs one error line and exits, and
+  `restart: unless-stopped` starts it again, so the same line repeats. The
+  repeating fatal line in `docker compose logs bot` is the cause to fix.
+* **`bot` restarts with `telegram.error.NetworkError` or `httpx.ConnectError`**
+  — the container cannot reach `api.telegram.org`; check outbound HTTPS from the
+  Docker host (proxy, VPN, or network filtering). The bot exits when its startup
+  call to Telegram fails, and `restart: unless-stopped` retries it, so the
+  service comes back on its own once connectivity returns. The worker tolerates
+  the same failure: it logs a warning, keeps ingesting, and only skips automatic
+  delivery.
 * **`/ask` says AI answers are disabled** — set `LLM_API_KEY`, or check the
   provider URL/model. `/news` and automatic delivery still work without a key.
 * **No automatic messages arrive** — confirm `/delivery` is on, inspect

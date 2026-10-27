@@ -1,3 +1,12 @@
+# Extension field: one image definition shared by the two long-running
+# services and the one-off migration job. Declaring the build once keeps the
+# three services from drifting apart and gives them a single image tag.
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ai-rss-news-assistant:local
+
 services:
   db:
     image: postgres:16-alpine
@@ -17,9 +26,7 @@ services:
     restart: unless-stopped
 
   bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    <<: *app
     depends_on:
       db:
         condition: service_healthy
@@ -39,9 +46,7 @@ services:
     restart: unless-stopped
 
   worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    <<: *app
     depends_on:
       db:
         condition: service_healthy
@@ -75,9 +80,7 @@ services:
   # straight to the Alembic CLI. DATABASE_URL is supplied from Compose
   # environment substitution; credentials are never hard-coded or logged.
   migrate:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    <<: *app
     depends_on:
       db:
         condition: service_healthy
