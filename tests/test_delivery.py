@@ -18,8 +18,8 @@ from telegram.error import BadRequest, Forbidden
 
 from ai_rss_news_assistant.db.base import Base
 from ai_rss_news_assistant.db.models import NewsDelivery, NewsItem, User, UserFeed
-from ai_rss_news_assistant.db.rss_worker import NewsWorker
 from ai_rss_news_assistant.worker.delivery import DeliveryService, _source_name
+from ai_rss_news_assistant.worker.service import NewsWorker
 from ai_rss_news_assistant.worker.summarization import SummarizationError
 
 
@@ -370,7 +370,7 @@ async def test_worker_runs_delivery_after_ingestion() -> None:
         )
 
         with patch(
-            "ai_rss_news_assistant.db.rss_worker.ingest_feeds_for_user",
+            "ai_rss_news_assistant.worker.service.ingest_feeds_for_user",
             new_callable=AsyncMock,
             return_value={},
         ):
@@ -393,7 +393,7 @@ async def test_worker_delivery_failure_does_not_stop_other_users() -> None:
         )
 
         with patch(
-            "ai_rss_news_assistant.db.rss_worker.ingest_feeds_for_user",
+            "ai_rss_news_assistant.worker.service.ingest_feeds_for_user",
             new_callable=AsyncMock,
             return_value={},
         ):

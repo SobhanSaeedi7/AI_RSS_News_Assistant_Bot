@@ -18,14 +18,14 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
-from ai_rss_news_assistant.db.html_text_extractor import html_to_text
 from ai_rss_news_assistant.db.models import NewsItem, User, UserFeed
-from ai_rss_news_assistant.db.rss_ingestion import (
+from ai_rss_news_assistant.worker.delivery import DeliveryRunner
+from ai_rss_news_assistant.worker.html_text import html_to_text
+from ai_rss_news_assistant.worker.ingestion import (
     _fetch_feed_content,
     _safe_url_for_log,
     ingest_feeds_for_user,
 )
-from ai_rss_news_assistant.worker.delivery import DeliveryRunner
 
 logger = logging.getLogger(__name__)
 
