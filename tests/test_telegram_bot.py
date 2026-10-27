@@ -18,7 +18,7 @@ from telegram import Update
 from telegram.error import InvalidToken, TelegramError
 from telegram.ext import Application, ContextTypes
 
-from ai_rss_news_assistant.agent import AgentAnswer, AgentSource
+from ai_rss_news_assistant.contracts import AgentAnswer, AgentSource
 from ai_rss_news_assistant.db.base import Base, Database
 from ai_rss_news_assistant.db.models import User, UserFeed
 from ai_rss_news_assistant.db.repository import (

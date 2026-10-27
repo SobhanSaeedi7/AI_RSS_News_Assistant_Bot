@@ -24,14 +24,9 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from ai_rss_news_assistant.agent import (
-    AGENT_ERROR,
-    AgentAnswer,
-    AgentSource,
-    NewsAgent,
-    safe_url,
-)
+from ai_rss_news_assistant.agent.answer import NewsAgent
 from ai_rss_news_assistant.config import Settings
+from ai_rss_news_assistant.contracts import AGENT_ERROR, AgentAnswer, AgentSource
 from ai_rss_news_assistant.db.base import Database
 from ai_rss_news_assistant.db.models import NewsItem, UserFeed
 from ai_rss_news_assistant.db.repository import (
@@ -46,7 +41,7 @@ from ai_rss_news_assistant.db.repository import (
 from ai_rss_news_assistant.db.url_normalization import normalize_url
 from ai_rss_news_assistant.llm import build_chat_client
 from ai_rss_news_assistant.logging import setup_logging
-from ai_rss_news_assistant.urls import parse_http_url
+from ai_rss_news_assistant.urls import parse_http_url, safe_url
 from ai_rss_news_assistant.worker.delivery import DeliveryService
 from ai_rss_news_assistant.worker.service import NewsWorker
 from ai_rss_news_assistant.worker.summarization import build_summarizer

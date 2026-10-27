@@ -13,12 +13,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from ai_rss_news_assistant.agent import (
+from ai_rss_news_assistant.agent.answer import NewsAgent, extract_terms
+from ai_rss_news_assistant.contracts import (
     AGENT_ERROR,
     AGENT_UNAVAILABLE,
     INSUFFICIENT_EVIDENCE,
-    NewsAgent,
-    extract_terms,
 )
 from ai_rss_news_assistant.db.base import Base
 from ai_rss_news_assistant.db.models import NewsItem, User, UserFeed
@@ -352,6 +351,88 @@ async def test_prompt_injection_stays_in_untrusted_source_block() -> None:
         ]
         assert all("second" not in (source.url or "") for source in answer.sources)
         assert "داده محرمانه کاربر دوم" not in user_message["content"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_answer_status_reports_insufficient_evidence() -> None:
+    """The status, not only the text, says why there is no answer."""
+    engine, factory = await _make_engine()
+    try:
+        user_id = await _seed_user(factory, telegram_user_id=2015, items=[])
+        agent = NewsAgent(session_factory=factory, client=FakeChatClient())
+
+        answer = await agent.answer(user_id, "آخرین خبرهای فناوری چیست؟")
+
+        assert answer.status == "insufficient_evidence"
+        assert answer.text == INSUFFICIENT_EVIDENCE
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_answer_status_reports_unavailable_without_llm() -> None:
+    engine, factory = await _make_engine()
+    try:
+        user_id = await _seed_user(
+            factory,
+            telegram_user_id=2016,
+            items=[{"title": "خبر فناوری", "content": "متن"}],
+        )
+        agent = NewsAgent(session_factory=factory, client=None)
+
+        answer = await agent.answer(user_id, "خبرهای فناوری چیست؟")
+
+        assert answer.status == "unavailable"
+        assert answer.text == AGENT_UNAVAILABLE
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_answer_status_follows_the_llm_error_classification() -> None:
+    """A timeout and a rejected request must not look the same upstream."""
+    engine, factory = await _make_engine()
+    try:
+        user_id = await _seed_user(
+            factory,
+            telegram_user_id=2017,
+            items=[{"title": "خبر فناوری", "content": "متن"}],
+        )
+        timeout_agent = NewsAgent(
+            session_factory=factory,
+            client=FakeChatClient(error=LLMError("slow", kind="timeout")),
+        )
+        failing_agent = NewsAgent(
+            session_factory=factory,
+            client=FakeChatClient(error=LLMError("rejected", kind="provider")),
+        )
+
+        timed_out = await timeout_agent.answer(user_id, "خبرهای فناوری چیست؟")
+        failed = await failing_agent.answer(user_id, "خبرهای فناوری چیست؟")
+
+        assert timed_out.status == "timeout"
+        assert failed.status == "provider_error"
+        assert timed_out.text == failed.text == AGENT_ERROR
+        assert "slow" not in timed_out.text
+        assert "rejected" not in failed.text
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_answer_status_reports_empty_question() -> None:
+    engine, factory = await _make_engine()
+    try:
+        user_id = await _seed_user(factory, telegram_user_id=2018, items=[])
+        client = FakeChatClient()
+        agent = NewsAgent(session_factory=factory, client=client)
+
+        answer = await agent.answer(user_id, "   ")
+
+        assert answer.status == "empty_question"
+        assert client.calls == []
     finally:
         await engine.dispose()
 
