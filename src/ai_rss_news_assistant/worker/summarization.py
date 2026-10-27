@@ -38,7 +38,12 @@ _USER_PROMPT = "Title: {title}\n\nArticle:\n{content}"
 
 
 class SummarizationError(LLMError):
-    """Raised when a summary cannot be produced."""
+    """Raised when a summary cannot be produced.
+
+    It carries the originating :class:`LLMError` classification in ``kind``
+    (``"timeout"`` or ``"provider"``), so a caller can tell a slow provider
+    from a failing one without parsing the message text.
+    """
 
 
 class Summarizer(Protocol):
@@ -104,7 +109,10 @@ class LLMSummarizer:
                 temperature=0.2,
             )
         except LLMError as exc:
-            raise SummarizationError(str(exc)) from None
+            # Keep the classification: the message is preserved unchanged, and
+            # kind lets callers (and delivery logs) distinguish a timeout from
+            # a provider failure without reading the text.
+            raise SummarizationError(str(exc), kind=exc.kind) from None
 
         return summary[:MAX_SUMMARY_CHARS]
 
