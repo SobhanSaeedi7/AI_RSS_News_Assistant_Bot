@@ -15,13 +15,14 @@ import pytest
 from pydantic import ValidationError
 from pydantic_settings import SettingsConfigDict
 
+from ai_rss_news_assistant.bot.entrypoint import run_bot
 from ai_rss_news_assistant.config import (
     AgentSettings,
     BotSettings,
     Settings,
     WorkerSettings,
 )
-from ai_rss_news_assistant.main import main, worker
+from ai_rss_news_assistant.worker.entrypoint import run_worker
 
 _SETTINGS_CLASSES = (Settings, BotSettings, WorkerSettings, AgentSettings)
 
@@ -79,7 +80,7 @@ def test_main_requires_bot_token(monkeypatch: pytest.MonkeyPatch) -> None:
     _database_env(monkeypatch)
     monkeypatch.delenv("BOT_TOKEN", raising=False)
     with pytest.raises(ValueError, match="BOT_TOKEN is required for the bot service"):
-        main()
+        run_bot()
 
 
 def test_worker_starts_without_bot_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,7 +91,24 @@ def test_worker_starts_without_bot_token(monkeypatch: pytest.MonkeyPatch) -> Non
         new_callable=AsyncMock,
         return_value=None,
     ):
-        worker()  # must not raise
+        run_worker()  # must not raise
+
+
+def test_package_root_does_not_shadow_the_worker_subpackage() -> None:
+    """Importing the package must not bind ``worker`` to the CLI function."""
+    import ai_rss_news_assistant
+    import ai_rss_news_assistant.worker as worker_package
+
+    assert ai_rss_news_assistant.worker is worker_package
+    assert hasattr(worker_package.service, "NewsWorker")
+
+
+def test_compatibility_facade_still_exposes_entry_points() -> None:
+    """The historical main/worker names keep working for existing callers."""
+    from ai_rss_news_assistant import main as facade
+
+    assert callable(facade.main)
+    assert callable(facade.worker)
 
 
 def test_database_url_is_required(monkeypatch: pytest.MonkeyPatch) -> None:

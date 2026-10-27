@@ -18,7 +18,8 @@ dependencies = [
 ]
 
 [project.scripts]
-ai-rss-news-assistant = "ai_rss_news_assistant:main"
+ai-rss-news-assistant = "ai_rss_news_assistant.bot.entrypoint:run_bot"
+ai-rss-news-assistant-worker = "ai_rss_news_assistant.worker.entrypoint:run_worker"
 
 [build-system]
 requires = ["uv_build>=0.12.22,<0.13.0"]
