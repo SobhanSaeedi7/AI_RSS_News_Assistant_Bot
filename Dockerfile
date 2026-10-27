@@ -44,6 +44,7 @@ RUN uv pip install --system --no-cache -e . \
 RUN useradd --create-home --uid 10001 appuser
 USER appuser
 
-# The same image runs the bot or worker depending on the Compose command.
+# The same image runs the bot, the worker, or the agent depending on the
+# Compose command: `bot` (default), `worker`, or `agent`.
 ENTRYPOINT ["python", "-m", "ai_rss_news_assistant"]
-CMD ["main"]
+CMD ["bot"]
