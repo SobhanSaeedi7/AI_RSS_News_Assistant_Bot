@@ -10,16 +10,20 @@ requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.13.0",
     "asyncpg>=0.30.0",
+    "fastapi>=0.162.0",
     "feedparser>=6.0.14",
+    "httpx>=0.28.1",
     "pydantic-settings>=2.16.0",
     "python-dotenv>=1.2.4",
     "python-telegram-bot>=22.8",
     "sqlalchemy[asyncio]>=2.0.40",
+    "uvicorn>=0.54.0",
 ]
 
 [project.scripts]
 ai-rss-news-assistant = "ai_rss_news_assistant.bot.entrypoint:run_bot"
 ai-rss-news-assistant-worker = "ai_rss_news_assistant.worker.entrypoint:run_worker"
+ai-rss-news-assistant-agent = "ai_rss_news_assistant.agent.entrypoint:run_agent"
 
 [build-system]
 requires = ["uv_build>=0.12.22,<0.13.0"]

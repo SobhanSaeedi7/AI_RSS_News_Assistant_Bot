@@ -1,7 +1,9 @@
-"""Allow running the package as ``python -m ai_rss_news_assistant [main|worker]``.
+"""Allow running the package as ``python -m ai_rss_news_assistant <service>``.
 
-Each command is imported lazily so that starting one service never imports (or
-validates the configuration of) another service.
+Services are ``bot`` (the default, also reachable as ``main`` for backwards
+compatibility), ``worker``, and ``agent``. Each one is imported lazily so that
+starting a service never imports -- or validates the configuration of -- another
+service.
 """
 
 from __future__ import annotations
@@ -17,9 +19,15 @@ def _run(command: str) -> None:
         run_worker()
         return
 
-    from ai_rss_news_assistant.main import main
+    if command == "agent":
+        from ai_rss_news_assistant.agent.entrypoint import run_agent
 
-    main()
+        run_agent()
+        return
+
+    from ai_rss_news_assistant.bot.entrypoint import run_bot
+
+    run_bot()
 
 
 if __name__ == "__main__":
