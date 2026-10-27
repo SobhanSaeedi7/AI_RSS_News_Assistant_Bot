@@ -16,8 +16,9 @@ Implemented:
   no LLM key is configured.
 * Per-user automatic delivery with an ON/OFF preference and delivery
   deduplication.
-* A grounded `/ask` agent that answers only from the requesting user's stored
-  news and cites source titles and URLs.
+* A dedicated `agent` service that answers only from the requesting user's
+  stored news and cites source titles and URLs, reached by the bot over internal
+  HTTP with a shared bearer token.
 * Alembic migrations, Docker Compose, and a pytest/ruff test suite.
 
 Not implemented: conversation history for `/ask` (it is stateless), semantic
@@ -31,27 +32,58 @@ one-off migration service:
 | Service | Responsibility |
 |---------|----------------|
 | `db` | PostgreSQL 16. Persistent shared application data (feeds, articles, users, delivery state). |
-| `migrate` | One-off Alembic `upgrade head` job. It exits after applying schema changes; `bot` and `worker` wait for it to complete successfully. |
-| `bot` | Telegram interactions, `/ask` grounded answering, and delivery preference commands. Runs the `main` entry point. |
+| `migrate` | One-off Alembic `upgrade head` job. It exits after applying schema changes; every application service waits for it to complete successfully. |
+| `bot` | Telegram interactions: commands, feed management, `/news`, the delivery preference. It answers `/ask` by calling the `agent` service over internal HTTP and never calls a provider itself. Runs the `bot` entry point. |
 | `worker` | RSS feed polling, news processing/summarization, and scheduled automatic delivery. Runs the `worker` entry point. |
+| `agent` | The internal answer API: grounded retrieval over one user's stored news, the provider call, and source metadata. It has no Telegram, RSS, or delivery code. Runs the `agent` entry point. |
 
-The bot and worker are separate application processes but share the same
-PostgreSQL database. Summarization and Q&A are Python modules within the
-application, not separate containers or model-serving services. The `migrate`
-service is not a long-running application service.
+The three application services run the same image, share one PostgreSQL
+database, and share nothing else. The `agent` publishes **no host port**: it is
+reachable only on the Compose network, and every request must present the shared
+`AGENT_INTERNAL_TOKEN` bearer token.
 
 ```
-+-----------+      +-----------+      +-----------+
-|   bot     |      |  worker   |      |    db     |
-| (Telegram)|      | (RSS/AI)  |      | (Postgres)|
-+-----+-----+      +-----+-----+      +-----+-----+
-      |                   |                   ^
-      |                   |                   |
-      +-------------------+-------------------+
-                  shared persistent data
++-------------+   POST /answer + bearer token   +-------------+
+|    bot      | -------------------------------> |    agent    |
+| (Telegram)  | <------------------------------- | (retrieval  |
++------+------+        answer JSON (200/4xx/5xx) |  + provider)|
+       |                                          +------+------+
+       |             +-------------+                     |
+       +-----------> |     db      | <-------------------+
+                     | (PostgreSQL)|
+                     +-------------+
+                            ^
+                            |
+                     +------+------+
+                     |   worker    |
+                     | (RSS, AI    |
+                     |  summaries, |
+                     |  delivery)  |
+                     +-------------+
 ```
 
-No Redis or additional infrastructure is included.
+### Why HTTP between the bot and the agent
+
+* The boundary is real, not just a convention. The bot cannot import retrieval or
+  provider code, so a Telegram process can never call a model; the agent cannot
+  import Telegram, so it can never send a message. Architecture tests enforce
+  both directions.
+* `/ask` degrades gracefully. If the agent is down, slow, or not configured, the
+  bot answers with a clear Persian message while `/news`, feed management, and
+  automatic delivery keep working.
+* Each concern has its own lifecycle. The agent can be restarted, or pointed at a
+  different model, without touching Telegram polling, and no second image is
+  needed.
+
+### Why no broker and no vector database
+
+One question produces one bounded answer, so a direct HTTP call with a
+40-second outer timeout (`AGENT_TIMEOUT_SECONDS`) is sufficient: there is no
+fan-out, nothing to queue, and no second consumer of answers. A broker would add
+a service to operate without removing a real limitation. Retrieval is
+deterministic keyword matching over the PostgreSQL database the services already
+share, so no vector store, embedding service, or search cluster is required
+(see *Retrieval limitations* for the trade-off this accepts).
 
 ## Telegram commands
 
@@ -79,19 +111,39 @@ Example: `/ask مهم‌ترین خبرهای فناوری این هفته چه 
 
 How an answer is produced:
 
-1. The question is normalized and split into search terms; common Persian and
-   English stopwords are dropped (`agent.extract_terms`).
-2. `db.repository.search_news_items` runs a case-insensitive keyword query
+1. The bot validates the question (non-empty and at most 500 characters) and
+   sends it to the `agent` service over internal HTTP together with the caller's
+   internal user id and the shared bearer token.
+2. The agent normalizes the question and splits it into search terms; common
+   Persian and English stopwords are dropped (`agent.extract_terms`).
+3. `db.repository.search_news_items` runs a case-insensitive keyword query
    over the **requesting user's** news titles, summaries, stored content, and
    feed titles. Ownership is enforced in the SQL query itself, not in the
    prompt or the Telegram handler.
-3. Candidates are re-ranked by the number of distinct query terms they
+4. Candidates are re-ranked by the number of distinct query terms they
    contain, then by recency, and at most five are kept.
-4. If no candidate matches, the bot replies that there is not enough
-   information and **does not call the LLM**.
-5. Otherwise the numbered sources (title, feed, publication date, URL, and a
+5. If no candidate matches, the agent returns the `insufficient_evidence`
+   answer and **does not call the LLM**.
+6. Otherwise the numbered sources (title, feed, publication date, URL, and a
    bounded excerpt) are sent to the configured OpenAI-compatible provider.
-   The reply is returned in Persian with a clickable source list.
+   The reply travels back to the bot with a clickable source list.
+
+How failures surface:
+
+| Agent outcome | HTTP status | What the user sees |
+|---------------|-------------|--------------------|
+| grounded answer | `200` | the answer plus sources |
+| not enough evidence | `200` | the "not enough information" message, no sources |
+| empty question | `200` | the "please write your question" message |
+| provider failed | `502` | the generic "try again later" message |
+| provider timed out | `504` | the generic "try again later" message |
+| answering unavailable / bad token | `503` / `401` | the "AI answers are not available" message |
+| invalid request | `422` | the generic "try again later" message (a bug on our side) |
+| unexpected failure | `500` | the generic "try again later" message |
+
+The bot renders only these canonical messages. It never forwards a response
+body, an exception, the bearer token, or a provider message to Telegram, and it
+never retries automatically: the user can simply ask again.
 
 The agent has no web access, no tools, and no ability to read another user's
 data. RSS text is treated as untrusted: newlines are collapsed, lookalike
@@ -147,11 +199,28 @@ cp .env.example .env
 Settings are read from environment variables at runtime and validated at
 startup; required secrets such as `BOT_TOKEN` cause a clear early failure when
 missing. Secrets are never hard-coded and never baked into the Docker image.
+Each service validates only the settings it uses, so the worker starts without
+`BOT_TOKEN` (delivery is disabled with a warning) and the bot starts without an
+agent token (`/ask` reports that answers are unavailable).
 
 Key variables:
 
 * `BOT_TOKEN` — Telegram bot token from @BotFather (required by `bot`; also
   used by `worker` to send automatic delivery messages).
+* `AGENT_INTERNAL_TOKEN` — shared bearer token for the internal agent API. The
+  `bot` sends it and the `agent` requires it; use the same long random value for
+  both (for example `python -c "import secrets; print(secrets.token_urlsafe(32))"`).
+  While it is empty the agent refuses every request (503) rather than serving
+  unauthenticated traffic, and the bot answers `/ask` with the "unavailable"
+  message.
+* `AGENT_BASE_URL` — where the bot reaches the agent (default
+  `http://agent:8000`).
+* `AGENT_HOST`, `AGENT_PORT` — bind address and port of the agent inside the
+  container network (defaults `0.0.0.0` and `8000`). The agent publishes no host
+  port; do not expose it publicly.
+* `AGENT_TIMEOUT_SECONDS` — outer timeout for one bot → agent request (default
+  `40`). Keep it larger than `LLM_TIMEOUT_SECONDS` so the agent can report its
+  own provider timeout first.
 * `APP_ENV` — `development`, `staging`, or `production` (default `development`).
 * `LOG_LEVEL` — `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (default `INFO`).
 * `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` — database credentials.
@@ -164,12 +233,12 @@ Key variables:
 * `FETCH_FULL_TEXT` — fetch full article text when `true` (default `true`).
 * `FETCH_TIMEOUT_SECONDS` — article-fetch timeout in seconds (default `30`).
 
-The `bot` service needs the LLM variables for `/ask`. The `worker` service
-needs them for LLM summaries; without a key it delivers trimmed article text
-instead. When the key is missing and matching news exists, `/ask` replies that
-AI answers are disabled; with no matching news it reports insufficient
-evidence instead. An empty `BOT_TOKEN` is treated as unset, so the worker can
-still ingest news with automatic delivery disabled.
+The `agent` service needs the LLM variables to answer `/ask`; the `bot` does not
+read them at all. The `worker` needs them for LLM summaries; without a key it
+delivers trimmed article text instead. When the key is missing and matching news
+exists, `/ask` replies that AI answers are unavailable; with no matching news it
+reports insufficient evidence instead. An empty `BOT_TOKEN` is treated as unset,
+so the worker can still ingest news with automatic delivery disabled.
 
 ## Getting started with Docker Compose
 
@@ -187,26 +256,31 @@ still ingest news with automatic delivery disabled.
    ```
 
    Compose starts `db`, waits for it to become healthy, runs the one-off
-   `migrate` service, and starts `bot` and `worker` only after migrations
-   succeed. Use `-d` to run in the background.
+   `migrate` service, and starts `bot`, `worker`, and `agent` only after
+   migrations succeed. The bot additionally waits for the agent's healthcheck.
+   Use `-d` to run in the background.
 
-   `bot`, `worker`, and `migrate` all run the same image, defined once in
-   `compose.yaml` and tagged `ai-rss-news-assistant:local`, so the three
-   services cannot drift apart.
+   `bot`, `worker`, `agent`, and `migrate` all run the same image, defined once
+   in `compose.yaml` and tagged `ai-rss-news-assistant:local`, so the services
+   cannot drift apart.
 
 3. Check status and follow logs:
 
    ```sh
    docker compose ps
    docker compose logs -f
-   docker compose logs -f bot worker
+   docker compose logs -f bot worker agent
    ```
+
+   `docker compose ps` shows `agent` as `healthy` once its `/health` endpoint
+   answers. `bot` and `worker` declare no healthcheck (they expose no port);
+   their container state and logs are the signal to use.
 
 4. Restart or recreate after changes:
 
    ```sh
-   docker compose restart bot worker   # restart without recreating
-   docker compose up --build -d        # rebuild/recreate after code or env changes
+   docker compose restart bot worker agent   # restart without recreating
+   docker compose up --build -d              # rebuild/recreate after code or env changes
    ```
 
    `restart` does not apply new migrations; use `docker compose up --build -d`
@@ -237,10 +311,10 @@ in the named volume `db_data`.
 
 Schema changes are managed with [Alembic](https://alembic.sqlalchemy.org/). The
 migration scripts live in `alembic/versions/`. The one-off `migrate` service
-runs `alembic upgrade head` against the `db` service and exits. `bot` and
-`worker` declare a `service_completed_successfully` dependency on `migrate`, so
-`docker compose up` applies pending migrations before the application services
-start. The `migrate` service is the only component that applies schema changes;
+runs `alembic upgrade head` against the `db` service and exits. `bot`, `worker`,
+and `agent` declare a `service_completed_successfully` dependency on `migrate`,
+so `docker compose up` applies pending migrations before the application
+services start. The `migrate` service is the only component that applies schema changes;
 use `docker compose run --rm migrate` to run it explicitly without starting the
 long-running services.
 
@@ -296,6 +370,15 @@ concurrently. See:
 
 ## Design decisions and rationale
 
+* **Internal HTTP for the answer service.** The bot and agent are separate
+  processes that must not share a call stack. HTTP with a shared bearer token is
+  the smallest boundary that enforces this, keeps the provider out of the
+  Telegram process, and lets `/ask` degrade instead of failing when the agent is
+  unwell.
+* **The agent is not exposed.** It publishes no host port, and an unset
+  `AGENT_INTERNAL_TOKEN` means "refuse everything" rather than "no authentication
+  required". Ids in requests are internal user ids, so a caller cannot name a user
+  it does not already own.
 * **Ownership in SQL, not in prompts.** Every repository query that touches
   user-owned rows filters by the internal `user_id`. Telegram handlers only
   resolve the caller's Telegram ID to that internal ID; question text and model
@@ -306,6 +389,10 @@ concurrently. See:
 * **The LLM is optional.** Delivery degrades to extractive summaries and
   `/ask` reports that AI answers are unavailable, so a missing key never
   produces invented answers.
+* **Statuses, not message parsing.** Provider failures are classified as
+  `timeout` or `provider` at the client, carried through the summarization
+  wrapper, mapped to HTTP statuses by the agent, and rendered from the shared
+  contract, so no layer ever has to read exception text to decide what to say.
 * **Bounded prompts and outputs.** At most five sources, bounded excerpts, and
   a bounded answer length keep requests predictable and fit Telegram limits.
 * **Untrusted RSS content.** Retrieved text is delimited and explicitly marked
@@ -369,7 +456,13 @@ test suite does not require PostgreSQL, Docker, a bot token, or an LLM key.
   missed.
 * Prompt-injection defenses are best-effort; the agent has no tools and no
   access to other users' data, but model wording can still be influenced.
-* One worker process is assumed; multiple worker replicas are not coordinated.
+* One worker process and one agent process are assumed; neither is coordinated
+  across replicas.
+* A bot → agent request is not queued or retried: a timeout or an unreachable
+  agent becomes a user-visible "try again". There is no broker, so nothing
+  survives a bot restart.
+* Rotating `AGENT_INTERNAL_TOKEN` requires restarting both the `agent` and the
+  `bot` services; requests made in between are rejected with 401.
 * RSS/article fetching is best-effort and bounded by time and response-size
   limits; some publishers may block the crawler or return partial text.
 
@@ -377,3 +470,5 @@ test suite does not require PostgreSQL, Docker, a bot token, or an LLM key.
 
 * Docker Compose: https://docs.docker.com/compose/
 * Alembic: https://alembic.sqlalchemy.org/
+* FastAPI: https://fastapi.tiangolo.com/
+* Uvicorn: https://www.uvicorn.org/
