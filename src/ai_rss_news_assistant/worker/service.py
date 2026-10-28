@@ -19,13 +19,10 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from ai_rss_news_assistant.db.models import NewsItem, User, UserFeed
+from ai_rss_news_assistant.feeds import fetch_feed_content, safe_url_for_log
 from ai_rss_news_assistant.worker.delivery import DeliveryRunner
 from ai_rss_news_assistant.worker.html_text import html_to_text
-from ai_rss_news_assistant.worker.ingestion import (
-    _fetch_feed_content,
-    _safe_url_for_log,
-    ingest_feeds_for_user,
-)
+from ai_rss_news_assistant.worker.ingestion import ingest_feeds_for_user
 
 logger = logging.getLogger(__name__)
 
@@ -87,10 +84,14 @@ class NewsWorker:
         """Poll all users' active feeds once.
 
         Each user is processed in its own database session, so a failure
-        for one user cannot poison the session for another.
+        for one user cannot poison the session for another. The aggregated
+        counts are logged as one summary line; no feed URL, message text, or
+        user content is logged from here.
         """
         async with self.session_factory() as session:
             users = await self._get_users_with_active_feeds(session)
+
+        feeds_checked = feeds_ok = feeds_failed = items_added = delivered = 0
 
         for user in users:
             try:
@@ -99,20 +100,36 @@ class NewsWorker:
                 # step raises. Repository functions only flush; without this
                 # commit the session close discarded every poll's results.
                 async with self.session_factory.begin() as user_session:
-                    await ingest_feeds_for_user(user_session, user.id)
+                    stats = await ingest_feeds_for_user(user_session, user.id)
                     if self.fetch_full_text:
                         await self._fetch_missing_full_text(user_session, user.id)
             except Exception:
                 logger.exception("Worker error for user %s", user.id)
                 continue
 
+            feeds_checked += stats.get("feeds_processed", 0)
+            feeds_ok += stats.get("feeds_succeeded", 0)
+            feeds_failed += len(stats.get("errors", []))
+            items_added += stats.get("items_created", 0)
+
             # Delivery runs in its own sessions after ingestion commits, so a
             # Telegram or LLM failure can never roll back stored news.
             if self.delivery_service is not None:
                 try:
-                    await self.delivery_service.deliver_for_user(user.id)
+                    delivered += await self.delivery_service.deliver_for_user(user.id)
                 except Exception:
                     logger.exception("Delivery error for user %s", user.id)
+
+        logger.info(
+            "Poll complete: users=%d feeds_checked=%d feeds_ok=%d "
+            "feeds_failed=%d items_added=%d delivered=%d",
+            len(users),
+            feeds_checked,
+            feeds_ok,
+            feeds_failed,
+            items_added,
+            delivered,
+        )
 
     async def _get_users_with_active_feeds(self, session: AsyncSession) -> list[User]:
         """Return users who have at least one active feed."""
@@ -156,10 +173,10 @@ class NewsWorker:
         """
         try:
             content = await asyncio.to_thread(
-                _fetch_feed_content, url, self.fetch_timeout
+                fetch_feed_content, url, self.fetch_timeout
             )
         except Exception:  # noqa: BLE001 - catch-all for transient fetch failures
-            logger.debug("Failed to fetch full text from %s", _safe_url_for_log(url))
+            logger.debug("Failed to fetch full text from %s", safe_url_for_log(url))
             return None
 
         return html_to_text(content.decode("utf-8", errors="replace"))

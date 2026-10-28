@@ -11,24 +11,18 @@ from datetime import UTC, datetime
 
 import pytest
 
-from ai_rss_news_assistant.agent.errors import (
-    ANSWER_STATUS_HTTP_STATUS,
-    AgentAuthError,
-    AgentConfigurationError,
-    AgentTimeoutError,
-    AgentUpstreamError,
-    answer_status_for_http_status,
-    answer_status_for_llm_error,
-    safe_error_payload,
-)
 from ai_rss_news_assistant.contracts import (
     AGENT_ERROR,
     AGENT_UNAVAILABLE,
+    ANSWER_STATUS_HTTP_STATUS,
     EMPTY_QUESTION,
+    FAILURE_HTTP_STATUSES,
     INSUFFICIENT_EVIDENCE,
     AgentAnswer,
     AgentSource,
     AnswerRequest,
+    answer_status_for_http_status,
+    answer_status_for_llm_error,
 )
 
 # --- payload round trips ---
@@ -143,17 +137,90 @@ def test_llm_classification_decides_answer_status() -> None:
     assert answer_status_for_llm_error("provider") == "provider_error"
 
 
-def test_error_types_carry_their_http_status_and_safe_code() -> None:
-    assert AgentAuthError().http_status == 401
-    assert AgentConfigurationError().http_status == 503
-    assert AgentUpstreamError("boom", kind="provider").http_status == 502
-    assert AgentTimeoutError("slow").http_status == 504
-    assert AgentTimeoutError().kind == "timeout"
+def test_every_answer_status_has_an_http_mapping() -> None:
+    """No answer status may reach the HTTP layer without a documented code."""
+    assert set(ANSWER_STATUS_HTTP_STATUS) == {
+        "answered",
+        "insufficient_evidence",
+        "empty_question",
+        "unavailable",
+        "timeout",
+        "provider_error",
+    }
+    # Both answer statuses that are not failures must be 200: the body says why.
+    assert ANSWER_STATUS_HTTP_STATUS["insufficient_evidence"] == 200
+    assert ANSWER_STATUS_HTTP_STATUS["empty_question"] == 200
 
 
-def test_safe_error_payload_never_exposes_diagnostics() -> None:
-    payload = safe_error_payload(AgentUpstreamError("HTTP 500 body=secret-value"))
+def test_failure_codes_cover_every_documented_error() -> None:
+    """The bot must be able to map every documented agent failure code."""
+    for code in (401, 403, 422, 500, 502, 503, 504):
+        assert code in FAILURE_HTTP_STATUSES
+        assert answer_status_for_http_status(code) in ANSWER_STATUS_HTTP_STATUS
 
-    assert payload["error"] == "upstream_error"
-    assert "secret-value" not in str(payload)
-    assert set(payload) == {"error", "message"}
+
+def test_services_do_not_keep_private_status_tables() -> None:
+    """One mapping lives in contracts; neither side may fork its own copy."""
+    import inspect
+
+    from ai_rss_news_assistant.agent import api
+    from ai_rss_news_assistant.bot import agent_client
+
+    for module in (api, agent_client):
+        source = inspect.getsource(module)
+        assert "_STATUS_BY_HTTP_CODE" not in source
+        assert "_STATUS_BY_ANSWER_STATUS" not in source
+
+    assert "ANSWER_STATUS_HTTP_STATUS" in inspect.getsource(api)
+    assert "answer_status_for_http_status" in inspect.getsource(agent_client)
+
+
+def test_canonical_failure_texts_never_carry_diagnostics() -> None:
+    """Every non-answer status must render a fixed, user-facing message."""
+    for status in (
+        "insufficient_evidence",
+        "empty_question",
+        "unavailable",
+        "timeout",
+        "provider_error",
+    ):
+        text = AgentAnswer.for_status(status).text
+        assert text
+        assert "Traceback" not in text
+        assert "HTTP" not in text
+        assert text != AGENT_UNAVAILABLE or status == "unavailable"
+
+
+# --- citation numbering -----------------------------------------------------
+
+
+def test_source_payload_round_trip_keeps_the_citation_index() -> None:
+    source = AgentSource(
+        title="خبر",
+        url="https://example.com/a",
+        citation_index=2,
+    )
+
+    restored = AgentSource.from_payload(source.to_payload())
+
+    assert restored == source
+    assert restored.citation_index == 2
+
+
+def test_source_payload_without_a_citation_index_still_parses() -> None:
+    """An older agent payload has no citation_index; it must remain readable."""
+    payload = AgentSource(title="خبر", url=None).to_payload()
+    payload.pop("citation_index")
+
+    restored = AgentSource.from_payload(payload)
+
+    assert restored.citation_index is None
+
+
+@pytest.mark.parametrize("bad_index", [0, -1, True, "1", 1.5])
+def test_source_payload_rejects_an_invalid_citation_index(bad_index) -> None:
+    payload = AgentSource(title="خبر", url=None).to_payload()
+    payload["citation_index"] = bad_index
+
+    with pytest.raises(TypeError):
+        AgentSource.from_payload(payload)

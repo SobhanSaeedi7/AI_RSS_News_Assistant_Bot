@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ai_rss_news_assistant.db.models import (
@@ -68,6 +68,7 @@ async def update_user_settings(
     user_id: uuid.UUID,
     auto_delivery_enabled: bool | None = None,
     is_active: bool | None = None,
+    delivery_interval_seconds: int | None = None,
 ) -> User | None:
     result = await session.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
@@ -77,8 +78,107 @@ async def update_user_settings(
         user.auto_delivery_enabled = auto_delivery_enabled
     if is_active is not None:
         user.is_active = is_active
+    if delivery_interval_seconds is not None:
+        if delivery_interval_seconds < 0:
+            raise ValueError("delivery_interval_seconds must not be negative")
+        user.delivery_interval_seconds = delivery_interval_seconds
     await session.flush()
     return user
+
+
+async def record_delivery_run(
+    session: AsyncSession, user_id: uuid.UUID, delivered_at: datetime
+) -> bool:
+    """Record that an automatic delivery run sent at least one message.
+
+    Only a run that actually delivered something updates the timestamp, so an
+    empty poll never postpones the next due delivery. Returns ``False`` when
+    the user does not exist.
+    """
+    result = await session.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        return False
+    user.last_delivered_at = delivered_at
+    await session.flush()
+    return True
+
+
+async def toggle_auto_delivery(
+    session: AsyncSession, user_id: uuid.UUID
+) -> bool | None:
+    """Flip the user's automatic-delivery switch and return the new value.
+
+    The flip is one SQL ``UPDATE`` so two concurrent ``/delivery`` calls cannot
+    both read the same old value and write the same new one. Returns ``None``
+    when the user does not exist.
+    """
+    result = await session.execute(
+        update(User)
+        .where(User.id == user_id)
+        .values(auto_delivery_enabled=~User.auto_delivery_enabled)
+        .returning(User.auto_delivery_enabled)
+    )
+    row = result.first()
+    if row is None:
+        return None
+    return bool(row[0])
+
+
+async def mark_delivery_unavailable(
+    session: AsyncSession, user_id: uuid.UUID, at: datetime
+) -> bool:
+    """Record that this recipient is currently unreachable on Telegram.
+
+    The value is deliberately general: ``Forbidden`` does not prove that the
+    user explicitly blocked the bot. A later update from the user clears it.
+    """
+    result = await session.execute(
+        update(User).where(User.id == user_id).values(delivery_unavailable_at=at)
+    )
+    return result.rowcount > 0
+
+
+async def clear_delivery_unavailable(session: AsyncSession, user_id: uuid.UUID) -> bool:
+    """Mark the recipient as reachable again after a new interaction."""
+    result = await session.execute(
+        update(User).where(User.id == user_id).values(delivery_unavailable_at=None)
+    )
+    return result.rowcount > 0
+
+
+async def mark_recipient_available(
+    session: AsyncSession, telegram_user_id: int
+) -> bool:
+    """Clear the unavailable status for an existing user by Telegram id.
+
+    This is used when the user contacts the bot again, which is the only real
+    proof that Telegram can reach them. It never creates a user.
+    """
+    result = await session.execute(
+        update(User)
+        .where(User.telegram_user_id == telegram_user_id)
+        .values(delivery_unavailable_at=None)
+    )
+    return result.rowcount > 0
+
+
+async def acquire_agent_lease(
+    session: AsyncSession, user_id: uuid.UUID, until: datetime
+) -> bool:
+    """Set the per-user agent-processing lease to expire at ``until``."""
+    result = await session.execute(
+        update(User).where(User.id == user_id).values(agent_processing_until=until)
+    )
+    return result.rowcount > 0
+
+
+async def release_agent_lease(session: AsyncSession, user_id: uuid.UUID) -> bool:
+    """Clear the agent-processing lease after an answer finishes or fails."""
+    result = await session.execute(
+        update(User).where(User.id == user_id).values(agent_processing_until=None)
+    )
+    return result.rowcount > 0
 
 
 async def deactivate_user(session: AsyncSession, user_id: uuid.UUID) -> bool:
@@ -115,6 +215,55 @@ async def get_feed(
 async def list_feeds(session: AsyncSession, user_id: uuid.UUID) -> list[UserFeed]:
     result = await session.execute(select(UserFeed).where(UserFeed.user_id == user_id))
     return list(result.scalars().all())
+
+
+async def list_due_feeds(
+    session: AsyncSession, user_id: uuid.UUID, now: datetime
+) -> list[UserFeed]:
+    """Return the user's active feeds that are due for a fetch.
+
+    A feed with no ``next_fetch_at`` is due immediately; a feed in backoff is
+    skipped until its retry time passes. Ownership is enforced in the query.
+    """
+    result = await session.execute(
+        select(UserFeed)
+        .where(
+            UserFeed.user_id == user_id,
+            UserFeed.active.is_(True),
+            or_(UserFeed.next_fetch_at.is_(None), UserFeed.next_fetch_at <= now),
+        )
+        .order_by(UserFeed.created_at, UserFeed.id)
+    )
+    return list(result.scalars().all())
+
+
+async def record_feed_success(
+    session: AsyncSession, feed: UserFeed, fetched_at: datetime
+) -> None:
+    """Mark a feed fetch as successful and clear its failure state."""
+    feed.last_fetched_at = fetched_at
+    feed.consecutive_failures = 0
+    feed.last_error = None
+    feed.next_fetch_at = None
+    await session.flush()
+
+
+async def record_feed_failure(
+    session: AsyncSession,
+    feed: UserFeed,
+    error_kind: str,
+    next_fetch_at: datetime,
+) -> None:
+    """Increment a feed's failure count and schedule its next attempt.
+
+    ``last_fetched_at`` is deliberately untouched: a failed fetch is not a
+    successful fetch, and leaving the old timestamp is what makes the problem
+    visible in ``/listfeeds``.
+    """
+    feed.consecutive_failures = (feed.consecutive_failures or 0) + 1
+    feed.last_error = error_kind
+    feed.next_fetch_at = next_fetch_at
+    await session.flush()
 
 
 async def update_feed(
@@ -159,6 +308,7 @@ async def create_news_item(
     url: str,
     title: str,
     normalized_url: str | None = None,
+    external_id: str | None = None,
     content: str | None = None,
     summary: str | None = None,
     published_at: datetime | None = None,
@@ -168,7 +318,8 @@ async def create_news_item(
 
     Returns ``None`` if the feed does not exist or is not owned by ``user_id``.
     ``normalized_url`` is computed from ``url`` via :func:`normalize_url` when
-    not supplied explicitly.
+    not supplied explicitly. ``external_id`` is the publisher GUID/Atom id when
+    the feed provides one; it is the preferred deduplication identity.
     """
     feed = await session.execute(
         select(UserFeed).where(UserFeed.id == feed_id, UserFeed.user_id == user_id)
@@ -185,6 +336,7 @@ async def create_news_item(
         title=title,
         url=url,
         normalized_url=normalized_url,
+        external_id=external_id,
         content=content,
         summary=summary,
         published_at=published_at,

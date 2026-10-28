@@ -20,6 +20,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -44,6 +45,30 @@ class User(Base):
     )
     auto_delivery_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False
+    )
+    # Minimum seconds between two automatic deliveries for this user. ``0``
+    # means "as soon as new items exist" (once per worker poll), which is the
+    # behaviour before per-user scheduling existed. It never affects /news or
+    # /ask, and ``auto_delivery_enabled = False`` overrides it entirely.
+    delivery_interval_seconds: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    last_delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Set when Telegram reports that this recipient cannot receive messages
+    # (the user blocked the bot, or the private chat is unavailable). It is a
+    # deliberately general status because a ``Forbidden`` response does not
+    # prove the exact cause. Any later update from the user clears it.
+    delivery_unavailable_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Bounded, cross-process lease held by the bot while it is answering an
+    # /ask question. The worker defers automatic delivery for this user until
+    # the lease is released or expires, so a summary cannot interrupt an
+    # in-progress answer. NULL means "not answering".
+    agent_processing_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -76,6 +101,16 @@ class UserFeed(Base):
         DateTime(timezone=True), nullable=True
     )
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Health state used to back off a feed that keeps failing. ``last_error``
+    # stores a fixed category ("unreachable", "not_a_feed", "processing"),
+    # never exception text, so it is safe to log and to show in /listfeeds.
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    last_error: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    next_fetch_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -87,6 +122,8 @@ class UserFeed(Base):
         UniqueConstraint("user_id", "id", name="uq_user_feeds_user_id_id"),
         Index("ix_user_feeds_user_id", "user_id"),
         Index("ix_user_feeds_user_id_active", "user_id", "active"),
+        # The poll query filters on (active, next_fetch_at).
+        Index("ix_user_feeds_active_next_fetch_at", "active", "next_fetch_at"),
     )
 
 
@@ -107,6 +144,10 @@ class NewsItem(Base):
     title: Mapped[str] = mapped_column(String, nullable=False)
     url: Mapped[str] = mapped_column(String, nullable=False)
     normalized_url: Mapped[str] = mapped_column(String, nullable=False)
+    # Stable publisher GUID/Atom id, when the feed provides one. It is the
+    # preferred deduplication identity; normalized_url remains the fallback for
+    # feeds that publish no id. NULL is allowed and never collides.
+    external_id: Mapped[str | None] = mapped_column(String, nullable=True)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(
@@ -131,6 +172,11 @@ class NewsItem(Base):
         # regardless of which feed it arrives through.
         UniqueConstraint(
             "user_id", "normalized_url", name="uq_news_items_user_id_normalized_url"
+        ),
+        # The same publisher GUID may only be stored once per user, even when
+        # it appears in two feeds or with two different links.
+        UniqueConstraint(
+            "user_id", "external_id", name="uq_news_items_user_id_external_id"
         ),
         # Composite candidate key so message_citations can reference
         # (user_id, news_item_id).

@@ -4,170 +4,96 @@ Fetches RSS/Atom feeds for users, parses entries, and persists new
 news items using the existing repository layer. All operations are
 user-isolated: a feed or news item is only accessible to its owner.
 
-A failure on one feed (network error, malformed content, timeout)
-does not prevent other feeds from being processed.
+A failure on one feed (network error, malformed content, timeout) does not
+prevent other feeds from being processed, and it is recorded on the feed so the
+poll loop can back off instead of hammering a dead URL on every cycle.
+
+Fetching, parsing, and feed classification live in
+:mod:`ai_rss_news_assistant.feeds`, which the bot also uses for ``/addfeed``.
 """
 
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
-import socket
-import urllib.request
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-import feedparser
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ai_rss_news_assistant.db.models import NewsItem
-from ai_rss_news_assistant.db.repository import create_news_item, list_feeds
+from ai_rss_news_assistant.db.repository import (
+    create_news_item,
+    list_due_feeds,
+    record_feed_failure,
+    record_feed_success,
+)
 from ai_rss_news_assistant.db.url_normalization import normalize_url
-from ai_rss_news_assistant.urls import parse_http_url
+from ai_rss_news_assistant.feeds import (
+    FeedNotUsableError,
+    FeedProbeStatus,
+    classify_parsed_feed,
+    fetch_feed_content,
+    parse_feed_content,
+    safe_url_for_log,
+)
 
 logger = logging.getLogger(__name__)
 
-REQUEST_TIMEOUT_SECONDS = 30
-MAX_RESPONSE_BYTES = 5 * 1024 * 1024  # 5 MiB
-USER_AGENT = "AI-RSS-News-Assistant/1.0"
+# Controlled backoff for a feed that keeps failing. The first failure retries
+# after one poll interval, then the delay doubles up to six hours. It stays in
+# the database, so a restart does not reset it.
+FEED_BACKOFF_BASE_SECONDS = 300
+FEED_BACKOFF_MAX_SECONDS = 6 * 60 * 60
 
-# Private/reserved IP ranges per RFC 1918, RFC 5737, RFC 6598, etc.
-_PRIVATE_NETWORKS = [
-    ipaddress.ip_network("0.0.0.0/8"),
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("100.64.0.0/10"),  # RFC 6598 carrier-grade NAT
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.0.0.0/24"),  # IETF protocol assignments
-    ipaddress.ip_network("192.0.2.0/24"),
-    ipaddress.ip_network("192.88.99.0/24"),  # deprecated 6to4 relay anycast
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("198.18.0.0/15"),  # benchmarking
-    ipaddress.ip_network("198.51.100.0/24"),
-    ipaddress.ip_network("203.0.113.0/24"),
-    ipaddress.ip_network("224.0.0.0/4"),
-    ipaddress.ip_network("240.0.0.0/4"),
-    ipaddress.ip_network("255.255.255.255/32"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("::/128"),
-    ipaddress.ip_network("::ffff:0:0/96"),
-    ipaddress.ip_network("2001:db8::/32"),
-    ipaddress.ip_network("fe80::/10"),
-    ipaddress.ip_network("fc00::/7"),
-    ipaddress.ip_network("ff00::/8"),
-]
+# Fixed categories stored on the feed row. Never exception text: the column is
+# shown in /listfeeds and written to logs.
+ERROR_UNREACHABLE = "unreachable"
+ERROR_NOT_A_FEED = "not_a_feed"
+ERROR_PROCESSING = "processing"
 
 
-def _is_blocked_host(hostname: str) -> bool:
-    """Return True if hostname resolves to a blocked/private IP address.
-
-    Resolves the hostname and checks each resolved IP against private,
-    loopback, link-local, multicast, and reserved ranges. If the hostname
-    cannot be resolved, returns False (urlopen will fail on its own).
-    """
-    try:
-        ip = ipaddress.ip_address(hostname)
-    except ValueError:
-        # Not a literal IP; try DNS resolution
-        try:
-            infos = socket.getaddrinfo(hostname, None)
-        except socket.gaierror:
-            return False
-        for info in infos:
-            try:
-                ip = ipaddress.ip_address(info[4][0])
-            except ValueError:
-                continue
-            for net in _PRIVATE_NETWORKS:
-                if ip in net:
-                    return True
-        return False
-
-    for net in _PRIVATE_NETWORKS:
-        if ip in net:
-            return True
-    return False
+def next_retry_delay(failures: int) -> int:
+    """Return the backoff delay in seconds for a failure count."""
+    if failures <= 0:
+        return 0
+    # Cap the exponent before shifting so a long-broken feed cannot overflow.
+    exponent = min(failures - 1, 20)
+    return min(FEED_BACKOFF_BASE_SECONDS * (2**exponent), FEED_BACKOFF_MAX_SECONDS)
 
 
-def _validate_url(url: str) -> None:
-    """Validate URL scheme and host for SSRF protection.
-
-    The scheme, hostname, and embedded-credential checks come from the shared
-    URL helpers, so the bot rejects exactly the same inputs when a user adds a
-    feed. Only the address blocking below is specific to outbound fetching.
-
-    Raises ValueError if the URL is not http(s) or the host resolves to a
-    blocked/private IP address.
-    """
-    parsed = parse_http_url(url)
-
-    if _is_blocked_host(parsed.hostname):
-        raise ValueError(f"Access to {parsed.hostname} is not allowed")
-
-
-class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Validate each redirect target before urllib follows it.
-
-    ``urlopen`` follows redirects internally, so checking only the final URL
-    after the response arrives is too late: the request to the redirect target
-    has already been made. This handler rejects blocked targets first.
-    """
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        _validate_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-def _open_url(request: urllib.request.Request, timeout: int = REQUEST_TIMEOUT_SECONDS):
-    """Open a URL using an opener that validates redirects before following."""
-    opener = urllib.request.build_opener(_SafeRedirectHandler())
-    return opener.open(request, timeout=timeout)
-
-
-def _safe_url_for_log(url: str) -> str:
-    """Return only the hostname so credentials never reach the logs."""
-    try:
-        hostname = urllib.request.urlsplit(url).hostname
-    except ValueError:
-        return "<invalid-url>"
-    return hostname or "<invalid-url>"
-
-
-def _fetch_feed_content(url: str, timeout: int = REQUEST_TIMEOUT_SECONDS) -> bytes:
-    """Fetch RSS/Atom feed content from a URL with a timeout.
-
-    Uses a custom User-Agent so feed publishers can identify our crawler.
-    Validates scheme and host before fetching, validates redirect targets
-    before following them, and caps response size at MAX_RESPONSE_BYTES.
-    """
-    _validate_url(url)
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with _open_url(request, timeout=timeout) as response:
-        # Re-validate after redirects
-        final_url = response.geturl()
-        if final_url != url:
-            _validate_url(final_url)
-        content = response.read(MAX_RESPONSE_BYTES + 1)
-        if len(content) > MAX_RESPONSE_BYTES:
-            raise ValueError(f"Response too large (max {MAX_RESPONSE_BYTES} bytes)")
-        return content
-
-
-def _parse_feed_content(content: bytes) -> dict:
-    """Parse RSS/Atom feed content using feedparser."""
-    return feedparser.parse(content)
+def classify_ingestion_error(exc: BaseException) -> str:
+    """Map an ingestion failure to the stored, log-safe category."""
+    if isinstance(exc, FeedNotUsableError):
+        return ERROR_NOT_A_FEED
+    if isinstance(exc, (OSError, ValueError)):
+        # urllib failures (HTTP, DNS, timeout, oversize) surface as OSError or
+        # ValueError; those mean the feed could not be read this time.
+        return ERROR_UNREACHABLE
+    return ERROR_PROCESSING
 
 
 def _extract_news_item(entry: dict) -> dict | None:
     """Extract normalized article fields from a feedparser entry.
 
+    ``external_id`` is the publisher's stable GUID/Atom id when present. It is
+    the preferred deduplication identity because two feeds can publish the same
+    article under different links. The link (or the id when it is itself a URL)
+    remains the display URL; an entry with neither is skipped, which is the
+    safe fallback because the schema requires a URL.
+
     Returns None if the entry has no usable URL.
     """
-    url = entry.get("link") or entry.get("id")
+    raw_external_id = entry.get("id")
+    external_id = (
+        raw_external_id.strip()
+        if isinstance(raw_external_id, str) and raw_external_id.strip()
+        else None
+    )
+
+    url = entry.get("link") or raw_external_id
     if not url:
         return None
 
@@ -189,6 +115,7 @@ def _extract_news_item(entry: dict) -> dict | None:
 
     return {
         "url": url,
+        "external_id": external_id,
         "title": title,
         "content": content,
         "summary": summary,
@@ -196,86 +123,143 @@ def _extract_news_item(entry: dict) -> dict | None:
     }
 
 
+async def _store_entries(
+    session: AsyncSession, user_id: uuid.UUID, feed_id: uuid.UUID, entries: list
+) -> int:
+    """Persist new entries for one feed, skipping duplicates. Returns a count."""
+    created = 0
+    for entry in entries:
+        extracted = _extract_news_item(entry)
+        if extracted is None:
+            continue
+
+        try:
+            normalized_url = normalize_url(extracted["url"])
+        except ValueError:
+            # A malformed article URL must not stop the rest of the feed.
+            continue
+
+        # Skip duplicates for this user. A stable publisher id wins when it is
+        # present; the normalized URL is always checked too, so a legacy row
+        # without an id still prevents a duplicate after a feed starts
+        # publishing ids. Both checks are scoped to this user.
+        identity_conditions = [NewsItem.normalized_url == normalized_url]
+        if extracted.get("external_id"):
+            identity_conditions.append(NewsItem.external_id == extracted["external_id"])
+        existing = await session.execute(
+            select(NewsItem).where(
+                NewsItem.user_id == user_id,
+                or_(*identity_conditions),
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            continue
+
+        try:
+            async with session.begin_nested():
+                await create_news_item(
+                    session=session,
+                    user_id=user_id,
+                    feed_id=feed_id,
+                    url=extracted["url"],
+                    title=extracted["title"],
+                    normalized_url=normalized_url,
+                    external_id=extracted.get("external_id"),
+                    content=extracted.get("content"),
+                    summary=extracted.get("summary"),
+                    published_at=extracted.get("published_at"),
+                    fetched_at=datetime.now(UTC),
+                )
+            created += 1
+        except IntegrityError:
+            # Savepoint was rolled back by begin_nested context manager.
+            # Continue to next article; outer transaction is intact.
+            continue
+
+    return created
+
+
 async def ingest_feeds_for_user(
     session: AsyncSession,
     user_id: uuid.UUID,
+    *,
+    now: datetime | None = None,
 ) -> dict:
-    """Fetch and process all active feeds for a user.
+    """Fetch and process a user's due active feeds.
 
-    For each active feed owned by the user, fetches the feed, parses entries,
-    and creates news items for new articles. Errors on individual feeds do
-    not prevent other feeds from being processed. A per-article integrity
-    conflict (e.g. duplicate normalized_url) is rolled back with a savepoint
-    and does not affect other articles in the same feed.
+    Only feeds whose ``next_fetch_at`` is due are attempted, so a feed that has
+    been failing is retried on an exponential schedule instead of on every
+    poll. A successful fetch records ``last_fetched_at``, clears the failure
+    state, and makes the feed due again immediately.
+
+    Errors on individual feeds do not prevent other feeds from being processed.
+    A per-article integrity conflict (e.g. duplicate ``normalized_url``) is
+    rolled back with a savepoint and does not affect other articles in the same
+    feed.
 
     Returns a dict with statistics:
-        feeds_processed: number of active feeds attempted
+        feeds_processed: number of due active feeds attempted
+        feeds_succeeded: feeds fetched and parsed successfully
         items_created: number of new news items created
         errors: list of error dicts for failed feeds
+
+    Active feeds still in backoff are not attempted and do not appear in
+    ``feeds_processed``.
     """
-    feeds = await list_feeds(session, user_id)
-    active_feeds = [f for f in feeds if f.active]
+    moment = now or datetime.now(UTC)
+    due_feeds = await list_due_feeds(session, user_id, moment)
 
     stats: dict = {
-        "feeds_processed": len(active_feeds),
+        "feeds_processed": len(due_feeds),
+        "feeds_succeeded": 0,
         "items_created": 0,
         "errors": [],
     }
 
-    for feed in active_feeds:
+    for feed in due_feeds:
         try:
-            content = await asyncio.to_thread(_fetch_feed_content, feed.url)
-            parsed = await asyncio.to_thread(_parse_feed_content, content)
+            content = await asyncio.to_thread(fetch_feed_content, feed.url)
+            parsed = await asyncio.to_thread(parse_feed_content, content)
+            result = classify_parsed_feed(parsed)
 
-            entries = parsed.get("entries", [])
-            for entry in entries:
-                extracted = _extract_news_item(entry)
-                if extracted is None:
-                    continue
+            if result.status is FeedProbeStatus.NOT_A_FEED:
+                # An HTML page or other non-feed: stop treating it as a feed
+                # until it recovers, instead of silently producing nothing.
+                raise FeedNotUsableError("response is not an RSS/Atom feed")
 
-                try:
-                    normalized_url = normalize_url(extracted["url"])
-                except ValueError:
-                    # A malformed article URL must not stop the rest of the feed.
-                    continue
+            # The feed's own title is authoritative; only fill it in when the
+            # subscription has none, so a user-visible title never flips.
+            if feed.title is None and result.title:
+                feed.title = result.title
 
-                # Skip duplicates for this user
-                existing = await session.execute(
-                    select(NewsItem).where(
-                        NewsItem.user_id == user_id,
-                        NewsItem.normalized_url == normalized_url,
-                    )
-                )
-                if existing.scalar_one_or_none() is not None:
-                    continue
+            stats["items_created"] += await _store_entries(
+                session, user_id, feed.id, parsed.get("entries") or []
+            )
+            await record_feed_success(session, feed, moment)
+            stats["feeds_succeeded"] += 1
 
-                try:
-                    async with session.begin_nested():
-                        await create_news_item(
-                            session=session,
-                            user_id=user_id,
-                            feed_id=feed.id,
-                            url=extracted["url"],
-                            title=extracted["title"],
-                            normalized_url=normalized_url,
-                            content=extracted.get("content"),
-                            summary=extracted.get("summary"),
-                            published_at=extracted.get("published_at"),
-                            fetched_at=datetime.now(UTC),
-                        )
-                    stats["items_created"] += 1
-                except IntegrityError:
-                    # Savepoint was rolled back by begin_nested context manager.
-                    # Continue to next article; outer transaction is intact.
-                    continue
+        except Exception as exc:  # one bad feed must not stop the others
+            kind = classify_ingestion_error(exc)
+            delay = next_retry_delay(feed.consecutive_failures + 1)
+            retry_at = moment + timedelta(seconds=delay)
+            await record_feed_failure(session, feed, kind, retry_at)
 
-        except Exception:
-            logger.exception("Failed to process feed %s", _safe_url_for_log(feed.url))
+            # Expected fetch failures are warnings, not tracebacks; the full
+            # traceback is available at DEBUG for real bugs.
+            logger.warning(
+                "Feed %s failed (%s controls=%s); retrying in %ss",
+                safe_url_for_log(feed.url),
+                kind,
+                feed.consecutive_failures,
+                delay,
+            )
+            logger.debug("Feed failure detail", exc_info=True)
+
             stats["errors"].append(
                 {
                     "feed_id": str(feed.id),
                     "feed_url": feed.url,
-                    "error": "feed processing failed",
+                    "error": kind,
                 }
             )
 

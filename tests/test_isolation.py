@@ -7,6 +7,8 @@ These tests run against an in-memory SQLite async engine. They verify that:
   reference another user's conversation; a citation cannot reference another
   user's news).
 * Cascade deletes remove owned records when a user or feed is deleted.
+* Guessing another user's identifier never reads, mutates, or deletes their
+  records (repository level, not just handler level).
 * Defaults (auto_delivery_enabled) are applied correctly.
 
 No real PostgreSQL, Telegram, LLM, or network is used.
@@ -25,6 +27,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from ai_rss_news_assistant.db import repository
 from ai_rss_news_assistant.db.base import Base
 from ai_rss_news_assistant.db.models import (
     ChatMessage,
@@ -473,3 +476,37 @@ def test_normalize_url_rejects_empty() -> None:
 def test_normalize_url_rejects_relative() -> None:
     with pytest.raises(ValueError):
         normalize_url("/article/1")
+
+
+@pytest.mark.anyio
+async def test_guessing_a_foreign_feed_id_reaches_nothing() -> None:
+    """Read, mutate and delete by a stolen id must all miss for a stranger.
+
+    Two users deliberately own feeds with the same URL, so a mistake in the
+    ownership predicate would be visible: deleting one must not touch the other.
+    """
+    session = await _create_session()
+    try:
+        owner = await _add_user(session, telegram_user_id=1)
+        stranger = await _add_user(session, telegram_user_id=2)
+        owned = await _add_feed(session, owner)
+        twin = await _add_feed(session, stranger)
+
+        assert owned.url == twin.url
+        assert await repository.get_feed(session, stranger.id, owned.id) is None
+        assert (
+            await repository.update_feed(session, stranger.id, owned.id, active=False)
+            is None
+        )
+        assert await repository.delete_feed(session, stranger.id, owned.id) is False
+
+        stored = await repository.get_feed(session, owner.id, owned.id)
+        assert stored is not None
+        assert stored.active is True
+
+        # Deleting the stranger's own feed leaves the owner's twin in place.
+        assert await repository.delete_feed(session, stranger.id, twin.id) is True
+        assert await repository.get_feed(session, owner.id, owned.id) is not None
+        assert await repository.get_feed(session, stranger.id, twin.id) is None
+    finally:
+        await _close_session(session)

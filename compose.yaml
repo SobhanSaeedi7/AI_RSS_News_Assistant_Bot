@@ -48,6 +48,9 @@ services:
       # Must stay larger than LLM_TIMEOUT_SECONDS so the agent can report its
       # own provider timeout instead of the bot timing out first.
       AGENT_TIMEOUT_SECONDS: ${AGENT_TIMEOUT_SECONDS:-40}
+      # /addfeed probes the URL once before storing it; this bounds that fetch
+      # so a slow host cannot hang the command.
+      FETCH_TIMEOUT_SECONDS: ${FETCH_TIMEOUT_SECONDS:-30}
     command: ["bot"]
     restart: unless-stopped
 

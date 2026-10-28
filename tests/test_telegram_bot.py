@@ -18,28 +18,38 @@ from telegram import Update
 from telegram.error import InvalidToken, TelegramError
 from telegram.ext import Application, ContextTypes
 
+from ai_rss_news_assistant.bot import use_cases
 from ai_rss_news_assistant.bot.handlers import (
+    PENDING_FEED_KEY,
     _feed_display_name,
     add_feed_command,
     ask_command,
     build_ask_messages,
+    cancel_command,
     delete_feed_command,
     delivery_command,
     help_command,
     list_feeds_command,
+    mark_recipient_available_handler,
     news_command,
+    pending_feed_input,
+    schedule_command,
     start_command,
 )
 from ai_rss_news_assistant.bot.messages import (
+    ADD_FEED_PROMPT,
     ASK_TOO_LONG,
     ASK_USAGE,
+    CANCEL_DONE,
+    CANCEL_NOTHING,
+    DEL_FEED_PROMPT,
+    DEL_FEED_SUCCESS_URL,
     DELIVERY_OFF,
     DELIVERY_ON,
-    DELIVERY_STATUS_OFF,
-    DELIVERY_STATUS_ON,
     DELIVERY_USAGE,
     NEWS_EMPTY,
     NEWS_MAX_MESSAGE_LENGTH,
+    PENDING_EXPIRED,
 )
 from ai_rss_news_assistant.contracts import AGENT_ERROR, AgentAnswer, AgentSource
 from ai_rss_news_assistant.db.base import Base, Database
@@ -50,13 +60,19 @@ from ai_rss_news_assistant.db.repository import (
     create_user,
     get_user_by_telegram_id,
 )
+from ai_rss_news_assistant.feeds import FeedProbe, FeedProbeStatus
 
 _TEST_TELEGRAM_USER_ID = 123456789
 _TEST_BOT_TOKEN = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 _TEST_DATABASE_URL = "postgresql+asyncpg://ai_rss_news:secret@db:5432/ai_rss_news"
 
 
-def _make_update(telegram_user_id: int = _TEST_TELEGRAM_USER_ID) -> MagicMock:
+def _make_update(
+    telegram_user_id: int = _TEST_TELEGRAM_USER_ID,
+    *,
+    chat_id: int = 100,
+    text: str = "",
+) -> MagicMock:
     """Create a mock Update with a Telegram user and message."""
     user = MagicMock()
     user.id = telegram_user_id
@@ -65,6 +81,8 @@ def _make_update(telegram_user_id: int = _TEST_TELEGRAM_USER_ID) -> MagicMock:
 
     message = MagicMock()
     message.reply_text = AsyncMock()
+    message.chat_id = chat_id
+    message.text = text
 
     update = MagicMock(spec=Update)
     update.effective_user = user
@@ -82,6 +100,7 @@ def _make_context(db: MagicMock, args: list | None = None, agent=None) -> MagicM
     context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
     context.application = application
     context.args = args or []
+    context.user_data = {}
     return context
 
 
@@ -95,6 +114,21 @@ def _mock_db_session(db: MagicMock) -> AsyncMock:
     return mock_session
 
 
+@pytest.fixture(autouse=True)
+def _stub_feed_probe(monkeypatch: pytest.MonkeyPatch):
+    """Give every /addfeed test a valid probe unless it overrides this.
+
+    The real probe performs an HTTP request; no test in this module is allowed
+    to reach the network, so the default is stubbed here and the failure-path
+    tests replace it explicitly.
+    """
+
+    async def _probe(url: str, timeout: int = 30) -> FeedProbe:
+        return FeedProbe(status=FeedProbeStatus.VALID, title="Example Feed")
+
+    monkeypatch.setattr("ai_rss_news_assistant.bot.use_cases.probe_feed_async", _probe)
+
+
 @pytest.mark.anyio
 async def test_start_command_creates_new_user() -> None:
     """Test /start creates a new user when none exists."""
@@ -103,13 +137,16 @@ async def test_start_command_creates_new_user() -> None:
 
     mock_session = _mock_db_session(context.application.bot_data["db"])
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=None,
-    ) as mock_get, patch(
-        "ai_rss_news_assistant.bot.use_cases.create_user",
-        return_value=MagicMock(spec=User),
-    ) as mock_create:
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=None,
+        ) as mock_get,
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.create_user",
+            return_value=MagicMock(spec=User),
+        ) as mock_create,
+    ):
         await start_command(update, context)
 
     mock_get.assert_called_once_with(mock_session, _TEST_TELEGRAM_USER_ID)
@@ -130,12 +167,15 @@ async def test_start_command_existing_user() -> None:
 
     mock_session = _mock_db_session(context.application.bot_data["db"])
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=existing_user,
-    ) as mock_get, patch(
-        "ai_rss_news_assistant.bot.use_cases.create_user",
-    ) as mock_create:
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=existing_user,
+        ) as mock_get,
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.create_user",
+        ) as mock_create,
+    ):
         await start_command(update, context)
 
     mock_get.assert_called_once_with(mock_session, _TEST_TELEGRAM_USER_ID)
@@ -173,15 +213,19 @@ async def test_add_feed_creates_new_feed() -> None:
     new_feed.url = "https://example.com/feed.xml"
     new_feed.title = "Example Feed"
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=MagicMock(spec=User),
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.list_feeds",
-        return_value=[],
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.create_feed",
-        return_value=new_feed,
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.list_feeds",
+            return_value=[],
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.create_feed",
+            return_value=new_feed,
+        ),
     ):
         await add_feed_command(update, context)
 
@@ -223,11 +267,12 @@ async def test_add_feed_malformed_ipv6_url() -> None:
     update = _make_update()
     context = _make_context(AsyncMock(), args=["http://[::1"])
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id"
-    ) as mock_get_user, patch(
-        "ai_rss_news_assistant.bot.use_cases.normalize_url"
-    ) as mock_normalize:
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id"
+        ) as mock_get_user,
+        patch("ai_rss_news_assistant.bot.use_cases.normalize_url") as mock_normalize,
+    ):
         await add_feed_command(update, context)
 
     mock_get_user.assert_not_called()
@@ -276,12 +321,15 @@ async def test_add_feed_duplicate() -> None:
     existing_feed = MagicMock(spec=UserFeed)
     existing_feed.url = "https://example.com/feed.xml"
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=MagicMock(spec=User),
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.list_feeds",
-        return_value=[existing_feed],
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.list_feeds",
+            return_value=[existing_feed],
+        ),
     ):
         await add_feed_command(update, context)
 
@@ -303,15 +351,19 @@ async def test_add_feed_integrity_error() -> None:
     orig.constraint_name = "uq_user_feeds_user_id_url"
     exc = IntegrityError("duplicate key violates unique constraint", None, orig)
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=MagicMock(spec=User),
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.list_feeds",
-        return_value=[],
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.create_feed",
-        side_effect=exc,
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.list_feeds",
+            return_value=[],
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.create_feed",
+            side_effect=exc,
+        ),
     ):
         await add_feed_command(update, context)
 
@@ -334,16 +386,21 @@ async def test_add_feed_unique_violation_wrong_constraint_not_duplicate() -> Non
     orig.constraint_name = "uq_user_feeds_user_id_id"
     exc = IntegrityError("duplicate key violates unique constraint", None, orig)
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=MagicMock(spec=User),
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.list_feeds",
-        return_value=[],
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.create_feed",
-        side_effect=exc,
-    ), pytest.raises(IntegrityError):
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.list_feeds",
+            return_value=[],
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.create_feed",
+            side_effect=exc,
+        ),
+        pytest.raises(IntegrityError),
+    ):
         await add_feed_command(update, context)
 
     # Rollback should still have been called
@@ -365,15 +422,19 @@ async def test_add_feed_unique_violation_returns_duplicate() -> None:
     orig.constraint_name = "uq_user_feeds_user_id_url"
     exc = IntegrityError("duplicate key violates unique constraint", None, orig)
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=MagicMock(spec=User),
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.list_feeds",
-        return_value=[],
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.create_feed",
-        side_effect=exc,
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.list_feeds",
+            return_value=[],
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.create_feed",
+            side_effect=exc,
+        ),
     ):
         await add_feed_command(update, context)
 
@@ -395,16 +456,21 @@ async def test_add_feed_unrelated_integrity_error_not_duplicate() -> None:
     orig.pgcode = "23503"
     exc = IntegrityError("foreign key constraint violated", None, orig)
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=MagicMock(spec=User),
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.list_feeds",
-        return_value=[],
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.create_feed",
-        side_effect=exc,
-    ), pytest.raises(IntegrityError):
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.list_feeds",
+            return_value=[],
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.create_feed",
+            side_effect=exc,
+        ),
+        pytest.raises(IntegrityError),
+    ):
         await add_feed_command(update, context)
 
     # Session rollback should have been called to reset the aborted transaction
@@ -419,22 +485,28 @@ async def test_add_feed_session_rolled_back_after_integrity_error() -> None:
     context = _make_context(AsyncMock(), args=["https://example.com/feed.xml"])
 
     _mock_db_session(context.application.bot_data["db"])
-    mock_session = context.application.bot_data["db"].session.return_value.__aenter__.return_value
+    mock_session = context.application.bot_data[
+        "db"
+    ].session.return_value.__aenter__.return_value
 
     orig = MagicMock()
     orig.pgcode = "23505"
     orig.constraint_name = "uq_user_feeds_user_id_url"
     exc = IntegrityError("duplicate key violates unique constraint", None, orig)
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=MagicMock(spec=User),
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.list_feeds",
-        return_value=[],
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.create_feed",
-        side_effect=exc,
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.list_feeds",
+            return_value=[],
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.create_feed",
+            side_effect=exc,
+        ),
     ):
         await add_feed_command(update, context)
 
@@ -456,21 +528,238 @@ async def test_add_feed_concurrent_safety_via_unique_constraint() -> None:
     orig.constraint_name = "uq_user_feeds_user_id_url"
     exc = IntegrityError("duplicate key violates unique constraint", None, orig)
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=MagicMock(spec=User),
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.list_feeds",
-        return_value=[],
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.create_feed",
-        side_effect=exc,
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.list_feeds",
+            return_value=[],
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.create_feed",
+            side_effect=exc,
+        ),
     ):
         await add_feed_command(update, context)
 
     update.effective_message.reply_text.assert_called_once()
     text = update.effective_message.reply_text.call_args[0][0]
     assert "قبلاً" in text
+
+
+@pytest.mark.anyio
+async def test_add_feed_unreachable_url_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A URL that cannot be fetched must not be stored as a subscription."""
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=["https://example.com/feed.xml"])
+    _mock_db_session(context.application.bot_data["db"])
+
+    async def _unreachable(url: str, timeout: int = 30) -> FeedProbe:
+        return FeedProbe(status=FeedProbeStatus.UNREACHABLE)
+
+    monkeypatch.setattr(
+        "ai_rss_news_assistant.bot.use_cases.probe_feed_async", _unreachable
+    )
+
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch("ai_rss_news_assistant.bot.use_cases.list_feeds", return_value=[]),
+        patch("ai_rss_news_assistant.bot.use_cases.create_feed") as mock_create,
+    ):
+        await add_feed_command(update, context)
+
+    mock_create.assert_not_called()
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "در دسترس نیست" in text
+
+
+@pytest.mark.anyio
+async def test_add_feed_html_page_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An HTML page is not a feed, even though the URL is well formed."""
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=["https://example.com/"])
+    _mock_db_session(context.application.bot_data["db"])
+
+    async def _not_a_feed(url: str, timeout: int = 30) -> FeedProbe:
+        return FeedProbe(status=FeedProbeStatus.NOT_A_FEED)
+
+    monkeypatch.setattr(
+        "ai_rss_news_assistant.bot.use_cases.probe_feed_async", _not_a_feed
+    )
+
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch("ai_rss_news_assistant.bot.use_cases.list_feeds", return_value=[]),
+        patch("ai_rss_news_assistant.bot.use_cases.create_feed") as mock_create,
+    ):
+        await add_feed_command(update, context)
+
+    mock_create.assert_not_called()
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "فید RSS/Atom معتبر نیست" in text
+
+
+@pytest.mark.anyio
+async def test_add_feed_blocked_destination_is_rejected() -> None:
+    """A private destination is refused before any request is made."""
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=["http://127.0.0.1/feed.xml"])
+    _mock_db_session(context.application.bot_data["db"])
+
+    # The autouse stub would accept anything; patch the real probe's seam to
+    # prove the URL itself is refused here without touching the network.
+    with (
+        patch("ai_rss_news_assistant.bot.use_cases.probe_feed_async") as mock_probe,
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch("ai_rss_news_assistant.bot.use_cases.list_feeds", return_value=[]),
+        patch("ai_rss_news_assistant.bot.use_cases.create_feed") as mock_create,
+    ):
+        from ai_rss_news_assistant.feeds import probe_feed_async as real_probe
+
+        mock_probe.side_effect = real_probe
+        await add_feed_command(update, context)
+
+    mock_create.assert_not_called()
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "مجاز نیست" in text
+
+
+@pytest.mark.anyio
+async def test_add_feed_stores_the_feed_title() -> None:
+    """The title from the feed itself is persisted, so /listfeeds can show it."""
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=["https://example.com/feed.xml"])
+    _mock_db_session(context.application.bot_data["db"])
+
+    created = MagicMock(spec=UserFeed)
+    created.url = "https://example.com/feed.xml"
+    created.title = "Example Feed"
+
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch("ai_rss_news_assistant.bot.use_cases.list_feeds", return_value=[]),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.create_feed", return_value=created
+        ) as mock_create,
+    ):
+        await add_feed_command(update, context)
+
+    assert mock_create.call_args.kwargs["title"] == "Example Feed"
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "Example Feed" in text
+
+
+@pytest.mark.anyio
+async def test_add_feed_empty_feed_is_accepted_with_a_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid feed with no items yet is stored, with an honest message."""
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=["https://example.com/feed.xml"])
+    _mock_db_session(context.application.bot_data["db"])
+
+    async def _empty(url: str, timeout: int = 30) -> FeedProbe:
+        return FeedProbe(status=FeedProbeStatus.EMPTY, title="New Feed")
+
+    monkeypatch.setattr("ai_rss_news_assistant.bot.use_cases.probe_feed_async", _empty)
+
+    created = MagicMock(spec=UserFeed)
+    created.url = "https://example.com/feed.xml"
+    created.title = "New Feed"
+
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch("ai_rss_news_assistant.bot.use_cases.list_feeds", return_value=[]),
+        patch("ai_rss_news_assistant.bot.use_cases.create_feed", return_value=created),
+    ):
+        await add_feed_command(update, context)
+
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "هیچ خبری ندارد" in text
+
+
+@pytest.mark.anyio
+async def test_add_feed_duplicate_does_not_probe_the_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-adding an existing feed must not cost a network request."""
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=["https://example.com/feed.xml"])
+    _mock_db_session(context.application.bot_data["db"])
+
+    existing = MagicMock(spec=UserFeed)
+    existing.url = "https://example.com/feed.xml"
+
+    calls: list[str] = []
+
+    async def _probe(url: str, timeout: int = 30) -> FeedProbe:
+        calls.append(url)
+        return FeedProbe(status=FeedProbeStatus.VALID)
+
+    monkeypatch.setattr("ai_rss_news_assistant.bot.use_cases.probe_feed_async", _probe)
+
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.list_feeds",
+            return_value=[existing],
+        ),
+    ):
+        await add_feed_command(update, context)
+
+    assert calls == []
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "قبلاً" in text
+
+
+@pytest.mark.anyio
+async def test_list_feeds_shows_a_failing_feed() -> None:
+    """A feed in backoff is visible in /listfeeds instead of looking healthy."""
+    update = _make_update()
+    context = _make_context(AsyncMock())
+    _mock_db_session(context.application.bot_data["db"])
+
+    feed = MagicMock(spec=UserFeed)
+    feed.id = uuid.UUID("00000000-0000-0000-0000-000000000100")
+    feed.title = "Broken Feed"
+    feed.url = "https://example.com/feed.xml"
+    feed.active = True
+    feed.last_error = "unreachable"
+
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch("ai_rss_news_assistant.bot.use_cases.list_feeds", return_value=[feed]),
+    ):
+        await list_feeds_command(update, context)
+
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "Broken Feed" in text
+    assert "در دسترس نیست" in text
 
 
 @pytest.mark.anyio
@@ -481,12 +770,15 @@ async def test_list_feeds_empty() -> None:
 
     _mock_db_session(context.application.bot_data["db"])
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=MagicMock(spec=User),
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.list_feeds",
-        return_value=[],
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.list_feeds",
+            return_value=[],
+        ),
     ):
         await list_feeds_command(update, context)
 
@@ -515,12 +807,15 @@ async def test_list_feeds_with_feeds() -> None:
     feed2.url = "https://other.com/feed.xml"
     feed2.active = False
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=MagicMock(spec=User),
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.list_feeds",
-        return_value=[feed1, feed2],
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.list_feeds",
+            return_value=[feed1, feed2],
+        ),
     ):
         await list_feeds_command(update, context)
 
@@ -546,12 +841,15 @@ async def test_list_feeds_splits_long_output() -> None:
     feed.url = "https://example.com/" + "a" * 2000
     feed.active = True
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=MagicMock(spec=User),
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.list_feeds",
-        return_value=[feed, feed, feed],
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.list_feeds",
+            return_value=[feed, feed, feed],
+        ),
     ):
         await list_feeds_command(update, context)
 
@@ -569,12 +867,15 @@ async def test_delete_feed_success() -> None:
 
     _mock_db_session(context.application.bot_data["db"])
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=MagicMock(spec=User),
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.delete_feed",
-        return_value=True,
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.delete_feed",
+            return_value=True,
+        ),
     ):
         await delete_feed_command(update, context)
 
@@ -592,12 +893,15 @@ async def test_delete_feed_not_found() -> None:
 
     _mock_db_session(context.application.bot_data["db"])
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
-        return_value=MagicMock(spec=User),
-    ), patch(
-        "ai_rss_news_assistant.bot.use_cases.delete_feed",
-        return_value=False,
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.get_user_by_telegram_id",
+            return_value=MagicMock(spec=User),
+        ),
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.delete_feed",
+            return_value=False,
+        ),
     ):
         await delete_feed_command(update, context)
 
@@ -620,8 +924,8 @@ async def test_delete_feed_invalid_id() -> None:
 
 
 @pytest.mark.anyio
-async def test_delete_feed_missing_id() -> None:
-    """Test /delfeed with no ID argument shows usage."""
+async def test_delete_feed_missing_id_starts_the_two_step_flow() -> None:
+    """Test /delfeed with no argument asks for the identifier."""
     update = _make_update()
     context = _make_context(AsyncMock(), args=[])
 
@@ -629,7 +933,8 @@ async def test_delete_feed_missing_id() -> None:
 
     update.effective_message.reply_text.assert_called_once()
     text = update.effective_message.reply_text.call_args[0][0]
-    assert "شناسه فید را ارائه دهید" in text
+    assert text == DEL_FEED_PROMPT
+    assert PENDING_FEED_KEY in context.user_data
 
 
 def test_error_handler_does_not_leak_secrets(caplog) -> None:
@@ -637,9 +942,7 @@ def test_error_handler_does_not_leak_secrets(caplog) -> None:
     context = MagicMock()
     context.error = Exception("database connection failed")
 
-    with caplog.at_level(
-        logging.ERROR, logger="ai_rss_news_assistant.bot.handlers"
-    ):
+    with caplog.at_level(logging.ERROR, logger="ai_rss_news_assistant.bot.handlers"):
         from ai_rss_news_assistant.bot.handlers import _error_handler
 
         asyncio.run(_error_handler(None, context))
@@ -655,19 +958,21 @@ def test_main_disposes_db_on_application_build_failure() -> None:
     mock_db.dispose = AsyncMock()
     mock_loop = MagicMock()
 
-    with patch(
-        "ai_rss_news_assistant.bot.entrypoint.Database", return_value=mock_db
-    ), patch(
-        "ai_rss_news_assistant.bot.entrypoint.ApplicationBuilder"
-    ) as mock_builder, patch(
-        "ai_rss_news_assistant.bot.entrypoint.asyncio.new_event_loop",
-        return_value=mock_loop,
-    ), patch(
-        "ai_rss_news_assistant.bot.entrypoint.asyncio.set_event_loop"
-    ), patch.dict(
-        "os.environ",
-        {"BOT_TOKEN": _TEST_BOT_TOKEN, "DATABASE_URL": _TEST_DATABASE_URL},
-        clear=True,
+    with (
+        patch("ai_rss_news_assistant.bot.entrypoint.Database", return_value=mock_db),
+        patch(
+            "ai_rss_news_assistant.bot.entrypoint.ApplicationBuilder"
+        ) as mock_builder,
+        patch(
+            "ai_rss_news_assistant.bot.entrypoint.asyncio.new_event_loop",
+            return_value=mock_loop,
+        ),
+        patch("ai_rss_news_assistant.bot.entrypoint.asyncio.set_event_loop"),
+        patch.dict(
+            "os.environ",
+            {"BOT_TOKEN": _TEST_BOT_TOKEN, "DATABASE_URL": _TEST_DATABASE_URL},
+            clear=True,
+        ),
     ):
         mock_builder.return_value.token.return_value.build.side_effect = RuntimeError(
             "build failed"
@@ -696,19 +1001,21 @@ def test_main_disposes_db_on_polling_failure() -> None:
     mock_application.updater.running = False
     mock_application.running = False
 
-    with patch(
-        "ai_rss_news_assistant.bot.entrypoint.Database", return_value=mock_db
-    ), patch(
-        "ai_rss_news_assistant.bot.entrypoint.ApplicationBuilder"
-    ) as mock_builder, patch(
-        "ai_rss_news_assistant.bot.entrypoint.asyncio.new_event_loop",
-        return_value=mock_loop,
-    ), patch(
-        "ai_rss_news_assistant.bot.entrypoint.asyncio.set_event_loop"
-    ), patch.dict(
-        "os.environ",
-        {"BOT_TOKEN": _TEST_BOT_TOKEN, "DATABASE_URL": _TEST_DATABASE_URL},
-        clear=True,
+    with (
+        patch("ai_rss_news_assistant.bot.entrypoint.Database", return_value=mock_db),
+        patch(
+            "ai_rss_news_assistant.bot.entrypoint.ApplicationBuilder"
+        ) as mock_builder,
+        patch(
+            "ai_rss_news_assistant.bot.entrypoint.asyncio.new_event_loop",
+            return_value=mock_loop,
+        ),
+        patch("ai_rss_news_assistant.bot.entrypoint.asyncio.set_event_loop"),
+        patch.dict(
+            "os.environ",
+            {"BOT_TOKEN": _TEST_BOT_TOKEN, "DATABASE_URL": _TEST_DATABASE_URL},
+            clear=True,
+        ),
     ):
         mock_builder.return_value.token.return_value.build.return_value = (
             mock_application
@@ -738,19 +1045,21 @@ def test_main_disposes_db_exactly_once_on_normal_shutdown() -> None:
     mock_application.updater.running = False
     mock_application.running = False
 
-    with patch(
-        "ai_rss_news_assistant.bot.entrypoint.Database", return_value=mock_db
-    ), patch(
-        "ai_rss_news_assistant.bot.entrypoint.ApplicationBuilder"
-    ) as mock_builder, patch(
-        "ai_rss_news_assistant.bot.entrypoint.asyncio.new_event_loop",
-        return_value=mock_loop,
-    ), patch(
-        "ai_rss_news_assistant.bot.entrypoint.asyncio.set_event_loop"
-    ), patch.dict(
-        "os.environ",
-        {"BOT_TOKEN": _TEST_BOT_TOKEN, "DATABASE_URL": _TEST_DATABASE_URL},
-        clear=True,
+    with (
+        patch("ai_rss_news_assistant.bot.entrypoint.Database", return_value=mock_db),
+        patch(
+            "ai_rss_news_assistant.bot.entrypoint.ApplicationBuilder"
+        ) as mock_builder,
+        patch(
+            "ai_rss_news_assistant.bot.entrypoint.asyncio.new_event_loop",
+            return_value=mock_loop,
+        ),
+        patch("ai_rss_news_assistant.bot.entrypoint.asyncio.set_event_loop"),
+        patch.dict(
+            "os.environ",
+            {"BOT_TOKEN": _TEST_BOT_TOKEN, "DATABASE_URL": _TEST_DATABASE_URL},
+            clear=True,
+        ),
     ):
         mock_builder.return_value.token.return_value.build.return_value = (
             mock_application
@@ -790,23 +1099,23 @@ def test_main_handles_invalid_token_without_leaking_token(caplog) -> None:
 
     mock_loop.run_until_complete.side_effect = run_until_complete
 
-    with patch(
-        "ai_rss_news_assistant.bot.entrypoint.Database", return_value=mock_db
-    ), patch(
-        "ai_rss_news_assistant.bot.entrypoint.ApplicationBuilder"
-    ) as mock_builder, patch(
-        "ai_rss_news_assistant.bot.entrypoint.setup_logging"
-    ), patch(
-        "ai_rss_news_assistant.bot.entrypoint.asyncio.new_event_loop",
-        return_value=mock_loop,
-    ), patch(
-        "ai_rss_news_assistant.bot.entrypoint.asyncio.set_event_loop"
-    ), patch.dict(
-        "os.environ",
-        {"BOT_TOKEN": _TEST_BOT_TOKEN, "DATABASE_URL": _TEST_DATABASE_URL},
-        clear=True,
-    ), caplog.at_level(
-        logging.ERROR, logger="ai_rss_news_assistant.bot.entrypoint"
+    with (
+        patch("ai_rss_news_assistant.bot.entrypoint.Database", return_value=mock_db),
+        patch(
+            "ai_rss_news_assistant.bot.entrypoint.ApplicationBuilder"
+        ) as mock_builder,
+        patch("ai_rss_news_assistant.bot.entrypoint.setup_logging"),
+        patch(
+            "ai_rss_news_assistant.bot.entrypoint.asyncio.new_event_loop",
+            return_value=mock_loop,
+        ),
+        patch("ai_rss_news_assistant.bot.entrypoint.asyncio.set_event_loop"),
+        patch.dict(
+            "os.environ",
+            {"BOT_TOKEN": _TEST_BOT_TOKEN, "DATABASE_URL": _TEST_DATABASE_URL},
+            clear=True,
+        ),
+        caplog.at_level(logging.ERROR, logger="ai_rss_news_assistant.bot.entrypoint"),
     ):
         mock_builder.return_value.token.return_value.build.return_value = (
             mock_application
@@ -1074,44 +1383,28 @@ async def _delivery_preference(db: Database, telegram_user_id: int) -> bool:
 
 
 @pytest.mark.anyio
-async def test_delivery_command_defaults_to_on(tmp_path) -> None:
-    """A new user sees automatic delivery enabled by default."""
+async def test_delivery_command_toggles_off_then_on(tmp_path) -> None:
+    """`/delivery` flips the persisted switch on every invocation."""
     db = await _make_real_db(tmp_path)
     try:
         update = _make_update()
-        context = _make_context(db)
+        await delivery_command(update, _make_context(db))
 
-        await delivery_command(update, context)
+        update.effective_message.reply_text.assert_awaited_once_with(DELIVERY_OFF)
+        assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is False
 
-        update.effective_message.reply_text.assert_awaited_once_with(DELIVERY_STATUS_ON)
+        second = _make_update()
+        await delivery_command(second, _make_context(db))
+
+        second.effective_message.reply_text.assert_awaited_once_with(DELIVERY_ON)
         assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is True
     finally:
         await db.dispose()
 
 
 @pytest.mark.anyio
-async def test_delivery_command_turns_off_and_persists(tmp_path) -> None:
-    """`/delivery off` is persisted and reflected on the next invocation."""
-    db = await _make_real_db(tmp_path)
-    try:
-        update = _make_update()
-        await delivery_command(update, _make_context(db, args=["off"]))
-
-        update.effective_message.reply_text.assert_awaited_once_with(DELIVERY_OFF)
-        assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is False
-
-        status_update = _make_update()
-        await delivery_command(status_update, _make_context(db))
-        status_update.effective_message.reply_text.assert_awaited_once_with(
-            DELIVERY_STATUS_OFF
-        )
-    finally:
-        await db.dispose()
-
-
-@pytest.mark.anyio
-async def test_delivery_command_turns_on(tmp_path) -> None:
-    """`/delivery on` re-enables delivery for a user who disabled it."""
+async def test_delivery_command_turns_on_when_disabled(tmp_path) -> None:
+    """A user who disabled delivery is re-enabled by the no-argument toggle."""
     db = await _make_real_db(tmp_path)
     try:
         async with db.session() as session:
@@ -1120,7 +1413,7 @@ async def test_delivery_command_turns_on(tmp_path) -> None:
             )
 
         update = _make_update()
-        await delivery_command(update, _make_context(db, args=["ON"]))
+        await delivery_command(update, _make_context(db))
 
         update.effective_message.reply_text.assert_awaited_once_with(DELIVERY_ON)
         assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is True
@@ -1129,17 +1422,18 @@ async def test_delivery_command_turns_on(tmp_path) -> None:
 
 
 @pytest.mark.anyio
-async def test_delivery_command_rejects_invalid_argument(tmp_path) -> None:
-    """An unknown argument shows usage and leaves the preference untouched."""
+async def test_delivery_command_rejects_arguments(tmp_path) -> None:
+    """Arguments are not a preference form any more; usage is shown instead."""
     db = await _make_real_db(tmp_path)
     try:
         async with db.session() as session:
             await create_user(session, _TEST_TELEGRAM_USER_ID)
 
-        update = _make_update()
-        await delivery_command(update, _make_context(db, args=["maybe"]))
+        for args in (["off"], ["on"], ["maybe"], ["off", "extra"]):
+            update = _make_update()
+            await delivery_command(update, _make_context(db, args=args))
+            update.effective_message.reply_text.assert_awaited_once_with(DELIVERY_USAGE)
 
-        update.effective_message.reply_text.assert_awaited_once_with(DELIVERY_USAGE)
         assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is True
     finally:
         await db.dispose()
@@ -1147,14 +1441,14 @@ async def test_delivery_command_rejects_invalid_argument(tmp_path) -> None:
 
 @pytest.mark.anyio
 async def test_delivery_preference_is_per_user(tmp_path) -> None:
-    """Disabling delivery for one user does not affect another user."""
+    """Toggling delivery for one user does not affect another user."""
     db = await _make_real_db(tmp_path)
     try:
         other_telegram_id = _TEST_TELEGRAM_USER_ID + 1
         async with db.session() as session:
             await create_user(session, other_telegram_id)
 
-        await delivery_command(_make_update(), _make_context(db, args=["off"]))
+        await delivery_command(_make_update(), _make_context(db))
 
         assert await _delivery_preference(db, _TEST_TELEGRAM_USER_ID) is False
         assert await _delivery_preference(db, other_telegram_id) is True
@@ -1189,6 +1483,118 @@ def _grounded_answer(
         sources=[AgentSource(title="هوش مصنوعی در ایران", url=url)],
         grounded=True,
     )
+
+
+@pytest.mark.anyio
+async def test_schedule_command_shows_the_default_interval() -> None:
+    """A new user is shown the default cadence, not an error."""
+    update = _make_update()
+    context = _make_context(AsyncMock())
+    _mock_db_session(context.application.bot_data["db"])
+
+    with patch(
+        "ai_rss_news_assistant.bot.use_cases.delivery_interval",
+        return_value=0,
+    ):
+        await schedule_command(update, context)
+
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "فوری" in text
+    assert "/schedule" in text
+
+
+@pytest.mark.anyio
+async def test_schedule_command_sets_an_interval() -> None:
+    """`/schedule 6h` stores 21600 seconds for the calling user."""
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=["6h"])
+    db = context.application.bot_data["db"]
+    _mock_db_session(db)
+
+    with patch(
+        "ai_rss_news_assistant.bot.use_cases.set_delivery_interval",
+        new_callable=AsyncMock,
+        return_value=21600,
+    ) as mock_set:
+        await schedule_command(update, context)
+
+    mock_set.assert_awaited_once_with(db, _make_update().effective_user.id, 21600)
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "6 ساعت" in text
+
+
+@pytest.mark.anyio
+async def test_schedule_command_shows_a_stored_interval() -> None:
+    update = _make_update()
+    context = _make_context(AsyncMock())
+    _mock_db_session(context.application.bot_data["db"])
+
+    with patch(
+        "ai_rss_news_assistant.bot.use_cases.delivery_interval",
+        return_value=86400,
+    ):
+        await schedule_command(update, context)
+
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "24 ساعت" in text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("raw", ["5m", "90m", "weekly", "3600"])
+async def test_schedule_command_rejects_unsupported_intervals(raw: str) -> None:
+    """Only the documented presets are accepted; nothing is written."""
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=[raw])
+    _mock_db_session(context.application.bot_data["db"])
+
+    with patch("ai_rss_news_assistant.bot.use_cases.set_delivery_interval") as mock_set:
+        await schedule_command(update, context)
+
+    mock_set.assert_not_called()
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "بازه‌های مجاز" in text
+
+
+@pytest.mark.anyio
+async def test_schedule_command_rejects_extra_arguments() -> None:
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=["1h", "6h"])
+    _mock_db_session(context.application.bot_data["db"])
+
+    with patch("ai_rss_news_assistant.bot.use_cases.set_delivery_interval") as mock_set:
+        await schedule_command(update, context)
+
+    mock_set.assert_not_called()
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "بازه‌های مجاز" in text
+
+
+@pytest.mark.anyio
+async def test_schedule_command_accepts_the_immediate_alias() -> None:
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=["فوری"])
+    db = context.application.bot_data["db"]
+    _mock_db_session(db)
+
+    with patch(
+        "ai_rss_news_assistant.bot.use_cases.set_delivery_interval",
+        new_callable=AsyncMock,
+        return_value=0,
+    ) as mock_set:
+        await schedule_command(update, context)
+
+    mock_set.assert_awaited_once_with(db, _make_update().effective_user.id, 0)
+
+
+@pytest.mark.anyio
+async def test_help_lists_the_schedule_command() -> None:
+    update = _make_update()
+    context = _make_context(AsyncMock())
+
+    await help_command(update, context)
+
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "/schedule" in text
 
 
 @pytest.mark.anyio
@@ -1363,3 +1769,422 @@ def test_build_ask_messages_escapes_source_url_attributes() -> None:
     )
 
     assert 'href="https://example.com/&quot;&gt;&lt;b&gt;"' in messages[0]
+
+
+def test_build_ask_messages_keeps_the_original_citation_numbers() -> None:
+    """A source cited as [2] is labelled [2], not renumbered to its list position."""
+    messages = build_ask_messages(
+        AgentAnswer(
+            text="پاسخ [2]",
+            sources=[
+                AgentSource(
+                    title="منبع دوم",
+                    url="https://example.com/two",
+                    citation_index=2,
+                )
+            ],
+            grounded=True,
+        )
+    )
+
+    text = "\n".join(messages)
+    assert "[2]" in text
+    assert "[1]" not in text
+
+
+def test_build_ask_messages_numbers_uncited_sources_by_position() -> None:
+    """A source without a citation_index still renders as [1] for compatibility."""
+    messages = build_ask_messages(
+        AgentAnswer(
+            text="پاسخ",
+            sources=[AgentSource(title="منبع اول", url=None)],
+            grounded=True,
+        )
+    )
+
+    assert "[1] منبع اول" in messages[0]
+
+
+# --- two-step /addfeed and /delfeed ---------------------------------------
+
+
+@pytest.mark.anyio
+async def test_add_feed_two_step_creates_the_feed(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        update = _make_update()
+        context = _make_context(db, args=[])
+        await add_feed_command(update, context)
+
+        update.effective_message.reply_text.assert_awaited_once_with(ADD_FEED_PROMPT)
+        assert context.user_data[PENDING_FEED_KEY]["action"] == "add"
+
+        follow_up = _make_update(text="https://example.com/feed.xml")
+        await pending_feed_input(follow_up, context)
+
+        assert PENDING_FEED_KEY not in context.user_data
+        feeds = await use_cases.list_user_feeds(db, _TEST_TELEGRAM_USER_ID)
+        assert [feed.url for feed in feeds] == ["https://example.com/feed.xml"]
+        assert (
+            "فید با موفقیت اضافه شد"
+            in (follow_up.effective_message.reply_text.await_args.args[0])
+        )
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_add_feed_two_step_can_be_cancelled(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        context = _make_context(db, args=[])
+        await add_feed_command(_make_update(), context)
+
+        cancel_update = _make_update()
+        await cancel_command(cancel_update, context)
+
+        cancel_update.effective_message.reply_text.assert_awaited_once_with(CANCEL_DONE)
+        assert PENDING_FEED_KEY not in context.user_data
+
+        follow_up = _make_update(text="https://example.com/feed.xml")
+        await pending_feed_input(follow_up, context)
+        follow_up.effective_message.reply_text.assert_not_awaited()
+        assert await use_cases.list_user_feeds(db, _TEST_TELEGRAM_USER_ID) == []
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_cancel_without_a_pending_request_is_harmless() -> None:
+    update = _make_update()
+    context = _make_context(AsyncMock())
+
+    await cancel_command(update, context)
+
+    update.effective_message.reply_text.assert_awaited_once_with(CANCEL_NOTHING)
+
+
+@pytest.mark.anyio
+async def test_pending_input_expires() -> None:
+    context = _make_context(AsyncMock())
+    context.user_data[PENDING_FEED_KEY] = {
+        "action": "add",
+        "telegram_user_id": _TEST_TELEGRAM_USER_ID,
+        "chat_id": 100,
+        "expires_at": datetime.now(UTC) - timedelta(seconds=1),
+    }
+
+    follow_up = _make_update(text="https://example.com/feed.xml")
+    await pending_feed_input(follow_up, context)
+
+    follow_up.effective_message.reply_text.assert_awaited_once_with(PENDING_EXPIRED)
+    assert PENDING_FEED_KEY not in context.user_data
+
+
+@pytest.mark.anyio
+async def test_pending_input_is_scoped_to_the_chat() -> None:
+    context = _make_context(AsyncMock())
+    await add_feed_command(_make_update(chat_id=100), context)
+
+    other_chat = _make_update(chat_id=200, text="https://example.com/feed.xml")
+    await pending_feed_input(other_chat, context)
+
+    other_chat.effective_message.reply_text.assert_not_awaited()
+    assert PENDING_FEED_KEY not in context.user_data
+
+
+@pytest.mark.anyio
+async def test_pending_input_is_scoped_to_the_user() -> None:
+    context = _make_context(AsyncMock())
+    await add_feed_command(_make_update(telegram_user_id=111, chat_id=100), context)
+
+    other_user = _make_update(
+        telegram_user_id=222,
+        chat_id=100,
+        text="https://example.com/feed.xml",
+    )
+    await pending_feed_input(other_user, context)
+
+    other_user.effective_message.reply_text.assert_not_awaited()
+    assert PENDING_FEED_KEY not in context.user_data
+
+
+@pytest.mark.anyio
+async def test_delete_feed_two_step_by_url(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        async with db.session() as session:
+            user = await create_user(session, _TEST_TELEGRAM_USER_ID)
+            await create_feed(
+                session,
+                user.id,
+                "https://example.com/feed.xml",
+                title="Example Feed",
+            )
+
+        context = _make_context(db)
+        await delete_feed_command(_make_update(), context)
+
+        follow_up = _make_update(text="https://example.com/feed.xml")
+        await pending_feed_input(follow_up, context)
+
+        follow_up.effective_message.reply_text.assert_awaited_once_with(
+            DEL_FEED_SUCCESS_URL.format(url="https://example.com/feed.xml")
+        )
+        assert await use_cases.list_user_feeds(db, _TEST_TELEGRAM_USER_ID) == []
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_delete_feed_two_step_by_id(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        async with db.session() as session:
+            user = await create_user(session, _TEST_TELEGRAM_USER_ID)
+            feed = await create_feed(
+                session,
+                user.id,
+                "https://example.com/feed.xml",
+                title="Example Feed",
+            )
+            feed_id = feed.id
+
+        context = _make_context(db)
+        await delete_feed_command(_make_update(), context)
+
+        follow_up = _make_update(text=str(feed_id))
+        await pending_feed_input(follow_up, context)
+
+        assert "حذف شد" in follow_up.effective_message.reply_text.await_args.args[0]
+        assert await use_cases.list_user_feeds(db, _TEST_TELEGRAM_USER_ID) == []
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_delete_feed_by_url_cannot_delete_another_users_feed(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        owner_telegram_id = 999_000_111
+        async with db.session() as session:
+            owner = await create_user(session, owner_telegram_id)
+            await create_feed(
+                session,
+                owner.id,
+                "https://example.com/owner/feed.xml",
+                title="Owner Feed",
+            )
+
+        context = _make_context(db)
+        await delete_feed_command(_make_update(), context)
+        follow_up = _make_update(text="https://example.com/owner/feed.xml")
+        await pending_feed_input(follow_up, context)
+
+        assert "یافت نشد" in follow_up.effective_message.reply_text.await_args.args[0]
+        assert len(await use_cases.list_user_feeds(db, owner_telegram_id)) == 1
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_delete_feed_direct_url_is_backward_compatible(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        async with db.session() as session:
+            user = await create_user(session, _TEST_TELEGRAM_USER_ID)
+            await create_feed(
+                session,
+                user.id,
+                "https://example.com/feed.xml",
+                title="Example Feed",
+            )
+
+        update = _make_update()
+        await delete_feed_command(
+            update,
+            _make_context(db, args=["https://example.com/feed.xml"]),
+        )
+
+        update.effective_message.reply_text.assert_awaited_once_with(
+            DEL_FEED_SUCCESS_URL.format(url="https://example.com/feed.xml")
+        )
+    finally:
+        await db.dispose()
+
+
+# --- /ask coordination lease ------------------------------------------------
+
+
+class _LeaseInspectingAgent:
+    """Reads the persisted lease while the answer is being produced."""
+
+    def __init__(self, db: Database, error: Exception | None = None) -> None:
+        self._db = db
+        self._error = error
+        self.lease_seen: datetime | None = None
+
+    async def answer(self, user_id, question: str) -> AgentAnswer:
+        async with self._db.session() as session:
+            user = await session.get(User, user_id)
+            assert user is not None
+            self.lease_seen = user.agent_processing_until
+        if self._error is not None:
+            raise self._error
+        return _grounded_answer()
+
+
+@pytest.mark.anyio
+async def test_ask_command_holds_a_bounded_lease_and_releases_it(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        async with db.session() as session:
+            user = await create_user(session, _TEST_TELEGRAM_USER_ID)
+            user_id = user.id
+
+        agent = _LeaseInspectingAgent(db)
+        before = datetime.now(UTC)
+
+        await ask_command(
+            _make_update(),
+            _make_context(db, args=["سؤال"], agent=agent),
+        )
+
+        assert agent.lease_seen is not None
+        lease = agent.lease_seen.replace(tzinfo=UTC)
+        assert (
+            before
+            < lease
+            <= before + timedelta(seconds=use_cases.AGENT_LEASE_SECONDS + 5)
+        )
+
+        async with db.session() as session:
+            stored = await session.get(User, user_id)
+            assert stored is not None
+            assert stored.agent_processing_until is None
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_ask_command_releases_the_lease_on_agent_failure(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        async with db.session() as session:
+            user = await create_user(session, _TEST_TELEGRAM_USER_ID)
+            user_id = user.id
+
+        agent = _LeaseInspectingAgent(db, error=RuntimeError("boom"))
+        await ask_command(
+            _make_update(),
+            _make_context(db, args=["سؤال"], agent=agent),
+        )
+
+        assert agent.lease_seen is not None
+        async with db.session() as session:
+            stored = await session.get(User, user_id)
+            assert stored is not None
+            assert stored.agent_processing_until is None
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_recipient_reactivation_clears_the_unavailable_status(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        async with db.session() as session:
+            user = await create_user(session, _TEST_TELEGRAM_USER_ID)
+            user.delivery_unavailable_at = datetime.now(UTC)
+
+        update = _make_update()
+        await mark_recipient_available_handler(update, _make_context(db))
+
+        async with db.session() as session:
+            stored = await get_user_by_telegram_id(session, _TEST_TELEGRAM_USER_ID)
+            assert stored is not None
+            assert stored.delivery_unavailable_at is None
+        update.effective_message.reply_text.assert_not_awaited()
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.anyio
+async def test_recipient_reactivation_does_not_create_a_user(tmp_path) -> None:
+    db = await _make_real_db(tmp_path)
+    try:
+        await mark_recipient_available_handler(_make_update(), _make_context(db))
+
+        async with db.session() as session:
+            assert (
+                await get_user_by_telegram_id(session, _TEST_TELEGRAM_USER_ID) is None
+            )
+    finally:
+        await db.dispose()
+
+
+# --- schedule command edge cases -------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_schedule_command_rejects_the_off_alias() -> None:
+    """`off` belongs to /delivery, not to the interval parser."""
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=["off"])
+    _mock_db_session(context.application.bot_data["db"])
+
+    with patch("ai_rss_news_assistant.bot.use_cases.set_delivery_interval") as mock_set:
+        await schedule_command(update, context)
+
+    mock_set.assert_not_called()
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "بازه‌های مجاز" in text
+
+
+@pytest.mark.anyio
+async def test_schedule_command_accepts_the_english_immediate_alias() -> None:
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=["immediate"])
+    db = context.application.bot_data["db"]
+    _mock_db_session(db)
+
+    with patch(
+        "ai_rss_news_assistant.bot.use_cases.set_delivery_interval",
+        new_callable=AsyncMock,
+        return_value=0,
+    ) as mock_set:
+        await schedule_command(update, context)
+
+    mock_set.assert_awaited_once_with(db, _TEST_TELEGRAM_USER_ID, 0)
+
+
+@pytest.mark.anyio
+async def test_help_documents_two_step_flows_and_the_toggle() -> None:
+    update = _make_update()
+    await help_command(update, _make_context(AsyncMock()))
+
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "/cancel" in text
+    assert "/delivery" in text
+    assert "/addfeed [url]" in text
+    assert "/delfeed [id|url]" in text
+    for token in ("0", "15m", "6h", "24h"):
+        assert token in text
+
+
+@pytest.mark.anyio
+async def test_start_documents_the_canonical_schedule_and_cancel() -> None:
+    update = _make_update()
+    context = _make_context(AsyncMock())
+
+    with patch(
+        "ai_rss_news_assistant.bot.handlers.use_cases.ensure_user_id",
+        new_callable=AsyncMock,
+    ):
+        await start_command(update, context)
+
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "/schedule" in text
+    assert "/cancel" in text
+    for token in ("0", "15m", "6h", "24h"):
+        assert token in text

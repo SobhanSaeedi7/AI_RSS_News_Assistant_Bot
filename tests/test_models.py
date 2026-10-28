@@ -43,6 +43,27 @@ def test_users_columns() -> None:
     assert isinstance(cols["updated_at"].type, DateTime)
 
 
+def test_users_delivery_schedule_columns() -> None:
+    """The per-user schedule is stored on the user row, not in worker memory."""
+    t = _table("users")
+    cols = {c.name: c for c in t.columns}
+
+    assert cols["delivery_interval_seconds"].nullable is False
+    assert cols["last_delivered_at"].nullable is True
+    assert cols["auto_delivery_enabled"].nullable is False
+
+
+def test_users_recipient_and_agent_coordination_columns() -> None:
+    """Recipient status and the /ask lease are nullable per-user state."""
+    t = _table("users")
+    cols = {c.name: c for c in t.columns}
+
+    assert isinstance(cols["delivery_unavailable_at"].type, DateTime)
+    assert cols["delivery_unavailable_at"].nullable is True
+    assert isinstance(cols["agent_processing_until"].type, DateTime)
+    assert cols["agent_processing_until"].nullable is True
+
+
 def test_users_telegram_user_id_unique() -> None:
     t = _table("users")
     assert t.c.telegram_user_id.unique is True
@@ -99,7 +120,14 @@ def test_news_items_unique_constraints() -> None:
         if isinstance(uc, UniqueConstraint)
     ]
     assert ["user_id", "normalized_url"] in uniques
+    assert ["user_id", "external_id"] in uniques
     assert ["user_id", "id"] in uniques
+
+
+def test_news_items_external_id_is_optional() -> None:
+    """A feed without a publisher GUID must keep working without a backfill."""
+    t = _table("news_items")
+    assert t.c.external_id.nullable is True
 
 
 def test_news_deliveries_composite_fk() -> None:

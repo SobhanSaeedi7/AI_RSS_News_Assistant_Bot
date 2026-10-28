@@ -19,8 +19,15 @@ import asyncio
 import logging
 import signal
 
+from telegram import Update
 from telegram.error import InvalidToken
-from telegram.ext import ApplicationBuilder, CommandHandler
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    TypeHandler,
+    filters,
+)
 
 from ai_rss_news_assistant.bot.agent_client import (
     AgentHTTPClient,
@@ -30,11 +37,15 @@ from ai_rss_news_assistant.bot.handlers import (
     _error_handler,
     add_feed_command,
     ask_command,
+    cancel_command,
     delete_feed_command,
     delivery_command,
     help_command,
     list_feeds_command,
+    mark_recipient_available_handler,
     news_command,
+    pending_feed_input,
+    schedule_command,
     start_command,
 )
 from ai_rss_news_assistant.bot.use_cases import Answerer
@@ -84,6 +95,16 @@ def run_bot() -> None:
         application = ApplicationBuilder().token(settings.bot_token).build()
         application.bot_data["db"] = db
         application.bot_data["agent"] = _build_answerer(settings)
+        # Used by /addfeed's bounded feed probe, so the add-time fetch honours
+        # the same configured timeout as polling.
+        application.bot_data["fetch_timeout_seconds"] = settings.fetch_timeout_seconds
+
+        # Group -1 runs before every command. It clears a persisted "recipient
+        # unavailable" status as soon as the user contacts the bot again, which
+        # is the only reliable proof that Telegram can reach them.
+        application.add_handler(
+            TypeHandler(Update, mark_recipient_available_handler), group=-1
+        )
 
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
@@ -92,7 +113,14 @@ def run_bot() -> None:
         application.add_handler(CommandHandler("delfeed", delete_feed_command))
         application.add_handler(CommandHandler("news", news_command))
         application.add_handler(CommandHandler("delivery", delivery_command))
+        application.add_handler(CommandHandler("schedule", schedule_command))
+        application.add_handler(CommandHandler("cancel", cancel_command))
         application.add_handler(CommandHandler("ask", ask_command))
+        # Non-command text is only consumed when a two-step /addfeed or /delfeed
+        # is pending; otherwise the handler returns without replying.
+        application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, pending_feed_input)
+        )
         application.add_error_handler(_error_handler)
 
         try:

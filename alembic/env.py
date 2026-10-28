@@ -15,7 +15,12 @@ from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import create_async_engine
 
 # Import the application's declarative Base so Alembic can inspect model metadata
-# for autogeneration and migration rendering.
+# for autogeneration and migration rendering. The models module must be imported
+# too: each table registers itself on ``Base.metadata`` when its module is
+# imported, so without this the metadata would be empty and
+# ``alembic revision --autogenerate`` / ``alembic check`` would wrongly report
+# every existing table as removed.
+from ai_rss_news_assistant.db import models  # noqa: F401  (registers the tables)
 from ai_rss_news_assistant.db.base import Base
 from alembic import context
 
