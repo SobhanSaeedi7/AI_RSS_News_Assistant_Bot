@@ -136,11 +136,11 @@ async def test_ingest_feeds_for_user_creates_news_items() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.worker.ingestion._open_url",
+                "ai_rss_news_assistant.feeds._open_url",
                 return_value=_make_feed_response(),
             ),
             patch(
-                "ai_rss_news_assistant.worker.ingestion.feedparser.parse",
+                "ai_rss_news_assistant.feeds.feedparser.parse",
                 return_value=parsed,
             ),
         ):
@@ -181,11 +181,11 @@ async def test_ingest_feeds_skips_inactive_feeds() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.worker.ingestion._open_url",
+                "ai_rss_news_assistant.feeds._open_url",
                 return_value=_make_feed_response([]),
             ),
             patch(
-                "ai_rss_news_assistant.worker.ingestion.feedparser.parse",
+                "ai_rss_news_assistant.feeds.feedparser.parse",
                 return_value=parsed,
             ),
         ):
@@ -227,11 +227,11 @@ async def test_worker_polls_and_processes_feeds() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.worker.ingestion._open_url",
+                "ai_rss_news_assistant.feeds._open_url",
                 side_effect=urlopen_side_effect,
             ),
             patch(
-                "ai_rss_news_assistant.worker.ingestion.feedparser.parse",
+                "ai_rss_news_assistant.feeds.feedparser.parse",
                 side_effect=feedparser_side_effect,
             ),
         ):
@@ -284,11 +284,11 @@ async def test_ingest_feeds_isolates_user_failures() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.worker.ingestion._open_url",
+                "ai_rss_news_assistant.feeds._open_url",
                 side_effect=urlopen_side_effect,
             ),
             patch(
-                "ai_rss_news_assistant.worker.ingestion.feedparser.parse",
+                "ai_rss_news_assistant.feeds.feedparser.parse",
                 side_effect=feedparser_side_effect,
             ),
         ):
@@ -368,11 +368,11 @@ async def test_ingest_feeds_request_failure_isolated() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.worker.ingestion._open_url",
+                "ai_rss_news_assistant.feeds._open_url",
                 side_effect=urlopen_side_effect,
             ),
             patch(
-                "ai_rss_news_assistant.worker.ingestion.feedparser.parse",
+                "ai_rss_news_assistant.feeds.feedparser.parse",
                 return_value=good_parsed,
             ),
         ):
@@ -410,7 +410,7 @@ async def test_fetch_full_text_preserves_summary_on_failure() -> None:
 
         # Simulate a failed fetch
         with patch(
-            "ai_rss_news_assistant.worker.service._fetch_feed_content",
+            "ai_rss_news_assistant.worker.service.fetch_feed_content",
             side_effect=OSError("connection refused"),
         ):
             worker = NewsWorker(
@@ -450,7 +450,7 @@ async def test_fetch_full_text_updates_content() -> None:
         response.geturl = MagicMock(return_value="https://example.com/article/1")
 
         with patch(
-            "ai_rss_news_assistant.worker.service._fetch_feed_content",
+            "ai_rss_news_assistant.worker.service.fetch_feed_content",
             return_value=html.encode("utf-8"),
         ):
             worker = NewsWorker(
@@ -487,11 +487,11 @@ async def test_worker_stop_gracefully() -> None:
 
         with (
             patch(
-                "ai_rss_news_assistant.worker.ingestion._open_url",
+                "ai_rss_news_assistant.feeds._open_url",
                 return_value=_make_feed_response([]),
             ),
             patch(
-                "ai_rss_news_assistant.worker.ingestion.feedparser.parse",
+                "ai_rss_news_assistant.feeds.feedparser.parse",
                 return_value=parsed,
             ),
         ):
@@ -578,11 +578,11 @@ async def test_worker_commits_ingested_news_after_session_closes(tmp_path) -> No
         )
         with (
             patch(
-                "ai_rss_news_assistant.worker.ingestion._open_url",
+                "ai_rss_news_assistant.feeds._open_url",
                 return_value=_make_feed_response(),
             ),
             patch(
-                "ai_rss_news_assistant.worker.ingestion.feedparser.parse",
+                "ai_rss_news_assistant.feeds.feedparser.parse",
                 return_value=parsed,
             ),
         ):
@@ -624,11 +624,11 @@ async def test_worker_rolls_back_partial_ingestion_when_user_fails(
         )
         with (
             patch(
-                "ai_rss_news_assistant.worker.ingestion._open_url",
+                "ai_rss_news_assistant.feeds._open_url",
                 return_value=_make_feed_response(),
             ),
             patch(
-                "ai_rss_news_assistant.worker.ingestion.feedparser.parse",
+                "ai_rss_news_assistant.feeds.feedparser.parse",
                 return_value=parsed,
             ),
             patch(
@@ -687,11 +687,11 @@ async def test_worker_failure_for_one_user_does_not_block_another(tmp_path) -> N
 
         with (
             patch(
-                "ai_rss_news_assistant.worker.ingestion._open_url",
+                "ai_rss_news_assistant.feeds._open_url",
                 side_effect=urlopen_side_effect,
             ),
             patch(
-                "ai_rss_news_assistant.worker.ingestion.feedparser.parse",
+                "ai_rss_news_assistant.feeds.feedparser.parse",
                 side_effect=feedparser_side_effect,
             ),
             patch(

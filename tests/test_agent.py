@@ -13,7 +13,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from ai_rss_news_assistant.agent.answer import NewsAgent, extract_terms
+from ai_rss_news_assistant.agent.answer import (
+    NewsAgent,
+    cited_source_indices,
+    extract_terms,
+)
 from ai_rss_news_assistant.contracts import (
     AGENT_ERROR,
     AGENT_UNAVAILABLE,
@@ -488,5 +492,104 @@ async def test_search_escapes_like_wildcards() -> None:
         assert [item.title for item, _ in matches] == ["رشد 100% فروش"]
         # "%" is escaped and treated as a literal, so it must not match every row.
         assert [item.title for item, _ in wildcard] == ["رشد 100% فروش"]
+    finally:
+        await engine.dispose()
+
+
+# --- citation selection -----------------------------------------------------
+
+
+def test_cited_source_indices_ignores_invalid_and_duplicate_markers() -> None:
+    assert cited_source_indices("a [1] b [3] c [1] d [0] e [9]", 2) == [1]
+
+
+def test_cited_source_indices_preserves_the_order_of_first_use() -> None:
+    assert cited_source_indices("[2] then [1] then [2]", 2) == [2, 1]
+
+
+@pytest.mark.anyio
+async def test_only_the_cited_source_is_returned() -> None:
+    """A retrieved row the model did not cite is not returned as a source."""
+    engine, factory = await _make_engine()
+    try:
+        user_id = await _seed_user(
+            factory,
+            telegram_user_id=2020,
+            items=[
+                {"title": "خبر فناوری اول", "content": "متن اول"},
+                {"title": "خبر فناوری دوم", "content": "متن دوم"},
+            ],
+        )
+        client = FakeChatClient(reply="پاسخ با ارجاع به منبع دوم [2].")
+        agent = NewsAgent(session_factory=factory, client=client)
+
+        answer = await agent.answer(user_id, "خبرهای فناوری چیست؟")
+
+        assert answer.grounded is True
+        assert len(answer.sources) == 1
+        # Retrieval is newest-first, so [1] is the second seeded item and [2] is
+        # the first one.
+        assert answer.sources[0].title == "خبر فناوری اول"
+        assert answer.sources[0].citation_index == 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_invented_citation_never_becomes_a_source() -> None:
+    engine, factory = await _make_engine()
+    try:
+        user_id = await _seed_user(
+            factory,
+            telegram_user_id=2021,
+            items=[{"title": "خبر فناوری", "content": "متن"}],
+        )
+        client = FakeChatClient(reply="پاسخ با ارجاع ساختگی [9].")
+        agent = NewsAgent(session_factory=factory, client=client)
+
+        answer = await agent.answer(user_id, "خبرهای فناوری چیست؟")
+
+        assert answer.grounded is True
+        assert answer.sources == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_uncited_answer_returns_no_sources() -> None:
+    engine, factory = await _make_engine()
+    try:
+        user_id = await _seed_user(
+            factory,
+            telegram_user_id=2022,
+            items=[{"title": "خبر فناوری", "content": "متن"}],
+        )
+        client = FakeChatClient(reply="پاسخ بدون ارجاع.")
+        agent = NewsAgent(session_factory=factory, client=client)
+
+        answer = await agent.answer(user_id, "خبرهای فناوری چیست؟")
+
+        assert answer.grounded is True
+        assert answer.sources == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_duplicate_citations_are_collapsed_to_one_source() -> None:
+    engine, factory = await _make_engine()
+    try:
+        user_id = await _seed_user(
+            factory,
+            telegram_user_id=2023,
+            items=[{"title": "خبر فناوری", "content": "متن"}],
+        )
+        client = FakeChatClient(reply="پاسخ [1] و دوباره [1].")
+        agent = NewsAgent(session_factory=factory, client=client)
+
+        answer = await agent.answer(user_id, "خبرهای فناوری چیست؟")
+
+        assert len(answer.sources) == 1
+        assert answer.sources[0].citation_index == 1
     finally:
         await engine.dispose()

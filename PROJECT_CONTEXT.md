@@ -1,114 +1,338 @@
 # PROJECT_CONTEXT.md
+
 # سند مرجع پروژه هفته سوم کارورزی — AI RSS News Assistant Bot
 
-**آخرین به‌روزرسانی:** ۱۹ اکتبر ۲۰۲۶  
-**وضعیت:** زیرساخت دیتابیس و migration آماده و آزمایش شده؛ مرحله بعد، audit لایه Repository / Data Access است.  
-**زبان:** Python 3.12  
-**هدف:** تحویل یک دموی قابل ارائه در سریع‌ترین زمان معقول، بدون قربانی‌کردن امنیت، صحت و تست‌پذیری.
+**آخرین به‌روزرسانی:** ۲۷ اکتبر ۲۰۲۶
+
+**وضعیت فعلی:** اصلاح معماری در PR قبلی Merge شده و برنچ جدیدی برای Cleanup ساخته شده است. در این مرحله باید کیفیت کدها، مرز سرویس‌ها، امنیت، مدیریت خطا، تست‌ها، Docker و مستندات را بررسی کنیم. فعلاً هدف افزودن قابلیت‌های جدید نیست؛ ابتدا باید نسخه فعلی پروژه را بررسی و تثبیت کنیم. بعد از اتمام Cleanup، قابلیت‌های باقی‌مانده در برنچ جداگانه پیاده‌سازی خواهند شد.
+
+> **مهم:** وضعیت دقیق Git، نام برنچ فعال، SHA کامیت و وضعیت working tree بعد از Merge هنوز در این گفتگو بررسی نشده‌اند. پیش از هر عملیات Git، وضعیت واقعی را بررسی کن.
 
 ---
 
 ## ۱. دستور شروع برای چت جدید
 
-اگر این فایل را در چت جدید دریافت کردی:
-
-1. کل سند را بخوان و بدون درخواست توضیح دوباره از بخش «وضعیت فعلی و قدم بعدی» ادامه بده.
-2. این پروژه را با پروژه قبلی ربات خبرهای ورزشی یا پروژه Text Explorer Chatbot اشتباه نگیر.
-3. وضعیت واقعی فایل‌ها و Git را بررسی کن؛ branch، commit، فایل و نتیجه تست را حدس نزن.
-4. فارسی ساده، دوستانه و مستقیم صحبت کن. اصطلاحات جدید را کوتاه و کاربردی توضیح بده.
-5. سرعت کار مهم است: از توضیحات طولانی و تکراری پرهیز کن؛ توضیح کوتاه بده و سریع به اقدام عملی برس.
-6. تغییرات را به مراحل منطقی، کوچک و قابل بازبینی تقسیم کن.
-7. برای OpenCode، prompt مشخص با هدف، محدوده، ممنوعیت‌ها و تست‌های مورد انتظار آماده کن.
-8. OpenCode باید commitهای Conventional Commit معنادار را خودش بسازد، وقتی یک مرحله منطقی و تست‌شده کامل شده است. نه برای هر ویرایش جزئی و نه یک commit بزرگ برای کارهای نامرتبط.
-9. بدون اجازه صریح، push، merge، branch switch یا عملیات مخرب Git انجام نده.
-10. پس از هر milestone مهم، همین سند را به‌روز کن و متن آماده جایگزینی یا افزوده‌شدن را ارائه بده.
-11. از سؤال‌های غیرضروری اجتناب کن. اگر ابهامی با بررسی read-only حل می‌شود، ابتدا آن بررسی را انجام بده.
-12. اگر فایل نیازمندی‌های اصلی شرکت در دسترس است، برای جزئیات از آن استفاده کن؛ در غیر این صورت از اطلاعات این سند استفاده کن و فقط سؤال ضروری بپرس.
-
----
-
-## ۲. معرفی و هدف پروژه
-
-پروژه یک Telegram Bot برای مدیریت RSS feedهای کاربران است.
-
-قابلیت‌های هدف:
-- افزودن، مشاهده و حذف RSS feedهای متعلق به هر کاربر.
-- دریافت دوره‌ای خبرهای جدید و ذخیره پایدار آن‌ها.
-- جلوگیری از ذخیره و ارسال خبرهای تکراری.
-- تولید خلاصه با مدل زبانی و ارسال خودکار طبق تنظیم کاربر.
-- ذخیره وضعیت روشن/خاموش بودن ارسال خودکار در دیتابیس و حفظ آن پس از restart.
-- جلوگیری از فراخوانی غیرضروری LLM برای ارسال خودکار وقتی کاربر آن را خاموش کرده است.
-- پاسخ به سؤال کاربر فقط با اتکا به خبرهای ذخیره‌شده و مجاز همان کاربر.
-- عدم استفاده از جست‌وجوی مستقیم اینترنت برای تکمیل پاسخ Agent.
-- ارائه عنوان خبر و لینک منبع واقعی، در صورت وجود شواهد کافی.
-- اعلام صریح نبود اطلاعات کافی در صورت نبود شواهد.
-- مدیریت خطا به‌گونه‌ای که خطای یک feed یا یک کاربر کل سامانه را متوقف نکند.
-- اجرا و توسعه با Docker Compose و مستندات قابل تکرار.
-
-این پروژه از پروژه‌های قبلی مستقل است و نباید تنظیمات یا کد آن‌ها بدون بررسی به این پروژه منتقل شود.
+1. این سند را بخوان و از بخش «وضعیت فعلی و قدم بعدی» ادامه بده.
+2. این پروژه را با AI Sport News Telegram Bot یا Text Explorer Chatbot اشتباه نگیر.
+3. پروژه را با رویکرد کلاسیک و دستی پیش ببر؛ فعلاً به OpenCode یا Freebuff دسترسی نداریم.
+4. پیش از تغییر کد، وضعیت مرتبط Git، ساختار فایل‌ها و تست‌های لازم را بررسی کن.
+5. با فارسی ساده، دوستانه، مستقیم و کاربردی توضیح بده. کاربر در ابتدای مسیر برنامه‌نویسی حرفه‌ای است.
+6. هر بار یک مرحله مشخص را انجام بده؛ هدف، علت تغییر، فایل‌های درگیر، روش تست و نتیجه مورد انتظار را توضیح بده.
+7. قابلیت‌های تکمیل‌شده را بی‌دلیل از نو نساز. ابتدا کد موجود را بخوان و شواهد را بررسی کن.
+8. نتایج تست یا بررسی را فقط وقتی موفق اعلام کن که خروجی واقعی آن را تأیید کند.
+9. بدون اجازه صریح کاربر commit، push، merge، branch switch یا عملیات مخرب Git انجام نده.
+10. هیچ دستور حذف Volume، reset دیتابیس، حذف داده یا عملیات مخرب Docker اجرا نکن.
+11. فایل `PROJECT_CONTEXT.md` را خود کاربر دستی به‌روزرسانی می‌کند؛ آن را ویرایش نکن.
+12. فایل `.gitignore` و سایر تغییرات محلی محافظت‌شده را حفظ کن.
+13. بعد از هر مرحله مهم، خلاصه وضعیت، تغییرات، تست‌ها، محدودیت‌ها و قدم بعدی را ارائه بده؛ کاربر تصمیم می‌گیرد چه زمانی سند مرجع را به‌روزرسانی کند.
 
 ---
 
-## ۳. فناوری‌ها و تصمیم‌های معماری ثبت‌شده
+## ۲. مشخصات پروژه
 
-### فناوری‌های موجود
-- Python 3.12
-- `uv`
+**هدف:** ساخت ربات تلگرام برای مدیریت RSS feedهای کاربران، ذخیره اخبار جدید، خلاصه‌سازی خودکار و پاسخ به پرسش‌ها بر اساس اخبار ذخیره‌شده.
+
+- مخزن: https://github.com/SobhanSaeedi7/AI_RSS_News_Assistant_Bot.git
+- مسیر محلی: `C:\Users\USER\Desktop\AI-RSS-News-Assistant`
+- محیط: Windows، PowerShell، Docker Desktop
+- Python: 3.12
+- مدیریت وابستگی‌ها: `uv`
+
+### نیازمندی‌های اصلی
+
+- افزودن، مشاهده و حذف Feedهای RSS/Atom.
+- اعتبارسنجی URL و مدیریت خطاهای اتصال، timeout و parsing.
+- دریافت دوره‌ای و ذخیره پایدار خبرها.
+- جلوگیری از پردازش یا ارسال تکراری خبرها.
+- خلاصه‌سازی خبرها با LLM و ارسال خودکار در تلگرام.
+- تنظیم ON/OFF ارسال خودکار به‌صورت مستقل برای هر کاربر و حفظ آن پس از restart.
+- پاسخ‌گویی فقط بر اساس خبرهای ذخیره‌شده و مجاز همان کاربر.
+- ارائه عنوان و لینک منبع در پاسخ‌های پشتیبانی‌شده.
+- اعلام نبود شواهد کافی در صورت پیدا نشدن اطلاعات مرتبط.
+- جلوگیری از دسترسی یک کاربر به Feedها، خبرها و تاریخچه کاربر دیگر.
+- جلوگیری از توقف کل Worker به‌دلیل خطای یک Feed، خبر یا ارسال.
+- اجرای پروژه با Docker Compose و مستندات قابل تکرار.
+
+---
+
+## ۳. وضعیت Git و شاخه‌ها
+
+### وضعیت جدید
+
+- برنچ معماری قبلی: `feat/architecture-refactor`
+- کاربر تأیید کرده که PR این برنچ Merge شده است.
+- کاربر تأیید کرده که برنچ جدید Cleanup ساخته شده است.
+- نام دقیق برنچ فعال، کامیت فعلی و وضعیت working tree باید از Git تأیید شوند.
+- تا زمان تأیید مجدد، هیچ تغییری را push یا commit نکن.
+
+### کامیت‌های معماری قبلی
+
+طبق گزارش اجرای معماری، برنچ قبلی پیش از Merge شامل ۱۷ کامیت جلوتر از `origin/main` بود. آخرین SHA گزارش‌شده:
+
+`2d741bddc7c1a1487a369566369b14b3d1760d71`
+
+این SHA مربوط به وضعیت گزارش‌شده پیش از Merge است؛ آن را به‌عنوان SHA فعلی `main` یا برنچ Cleanup فرض نکن.
+
+کامیت‌های مهم معماری شامل این موارد بودند:
+
+- جداسازی تنظیمات سرویس‌ها.
+- استخراج Bot به پکیج مستقل.
+- ایجاد entry point مستقل برای Worker.
+- ایجاد API داخلی احراز هویت‌شده برای Agent.
+- انتقال ارتباط Bot با Agent به HTTP.
+- افزودن Agent به Docker Compose.
+- اصلاح مرزهای دیتابیس و دسترسی به داده.
+- تست‌های معماری و امنیت.
+- مستندات معماری و عملیات.
+
+### قواعد Git
+
+پیش از هر عملیات:
+
+```bash
+git status --short --branch
+git log --oneline -5
+git log --oneline -5 origin/main
+```
+
+در صورت نیاز به تازه‌سازی اطلاعات remote:
+
+```bash
+git fetch origin
+```
+
+این دستور به‌تنهایی working tree را تغییر نمی‌دهد؛ بااین‌حال، قبل از branch switch یا Merge باید اثر عملیات بررسی شود.
+
+**فایل‌های محافظت‌شده:**
+
+- `.gitignore`
+- `PROJECT_CONTEXT.md`
+- `.env`
+
+این فایل‌ها را نخوان، چاپ نکن، تغییر نده، stage نکن، commit نکن، stash نکن، reset نکن و overwrite نکن. به‌ویژه فایل `.env` را برای بررسی تنظیمات چاپ نکن و هیچ Secret واقعی را در گزارش قرار نده.
+
+از `git add .` و `git add -A` استفاده نکن. فایل‌های موردنیاز باید به‌صورت مشخص انتخاب شوند.
+
+---
+
+## ۴. معماری فعلی
+
+معماری هدف شامل سه سرویس نرم‌افزاری و دیتابیس مشترک است.
+
+### Bot Service
+
+مسئول ارتباط با Telegram، دریافت فرمان‌ها، مدیریت Feedها، نمایش اخبار و دریافت سؤال کاربر است.
+
+فرمان‌های شناخته‌شده:
+
+- `/start`
+- `/help`
+- `/addfeed <URL>`
+- `/listfeeds`
+- `/delfeed <UUID>`
+- `/news`
+- `/ask <question>`
+- `/delivery`
+- `/delivery on`
+- `/delivery off`
+
+در معماری جدید، Bot برای پاسخ‌گویی Agent از API داخلی HTTP استفاده می‌کند و نباید مستقیماً منطق Agent یا پیاده‌سازی LLM را فراخوانی کند.
+
+Entry point گزارش‌شده:
+
+`bot.entrypoint:run_bot`
+
+### News Worker
+
+مسئول polling دوره‌ای RSS، parsing، ذخیره خبر، جلوگیری از تکرار، خلاصه‌سازی و ارسال خودکار است.
+
+Entry point گزارش‌شده:
+
+`worker.entrypoint:run_worker`
+
+### Agent Service
+
+مسئول بازیابی خبرهای مرتبط و تولید پاسخ مبتنی بر شواهد مجاز کاربر است.
+
+API گزارش‌شده:
+
+- `GET /health`
+- `POST /answer`
+
+Entry point گزارش‌شده:
+
+`agent.entrypoint:run_agent`
+
+ارتباط داخلی Agent با Bearer token محافظت می‌شود. Agent نباید endpoint عمومی یا دسترسی آزاد به وب داشته باشد.
+
+### Database
+
+PostgreSQL محل ذخیره مشترک و پایدار داده‌هاست. Migration از طریق سرویس مستقل `migrate` اجرا می‌شود.
+
+### Docker Compose
+
+طبق گزارش معماری، Bot، Worker، Agent و PostgreSQL در Compose تعریف شده‌اند و Migration به‌عنوان سرویس جداگانه وجود دارد. Agent پورت عمومی منتشرشده روی میزبان ندارد و ارتباط آن از شبکه داخلی Compose انجام می‌شود.
+
+این جزئیات بر اساس گزارش قبلی‌اند؛ در مرحله Cleanup باید فایل‌های فعلی Compose و Dockerfileها بررسی شوند، نه اینکه بدون مشاهده، صحت همه موارد فرض شود.
+
+### فناوری‌ها
+
+- Python 3.12 و `uv`
 - PostgreSQL 16
-- SQLAlchemy با API ناهمگام
-- `asyncpg`
-- Alembic برای migrationهای دیتابیس
+- SQLAlchemy Async و `asyncpg`
+- Alembic
 - Docker و Docker Compose
-- Telegram Bot API
+- `python-telegram-bot`
+- `feedparser`
+- pytest و Ruff
+- FastAPI و Uvicorn برای API داخلی Agent
+- API سازگار با OpenAI برای LLM
 
-ارائه‌دهنده مدل زبانی، مدل نهایی، کتابخانه RSS و جزئیات framework Agent باید از روی کد و نیازمندی‌های واقعی تأیید شوند؛ چیزی را حدس نزن.
-
-### معماری
-مرزبندی فعلی:
-- **Bot service:** تعامل با Telegram، فرمان‌ها و عملیات کاربر.
-- **Worker service:** بررسی دوره‌ای RSS، ذخیره خبر، خلاصه‌سازی و ارسال خودکار.
-- **Database service:** PostgreSQL.
-
-Agent فعلاً می‌تواند یک جزء منطقی داخل برنامه باشد. container مستقل برای Agent هنوز تصمیم قطعی نیست و نباید بدون توجیه پیچیدگی بیشتری اضافه شود.
-
-Message broker فعلاً انتخاب یا اضافه نشده است. فقط زمانی اضافه شود که مزایایی مثل صف پایدار، retry مستقل، backpressure یا پردازش موازی، پیچیدگی آن را توجیه کند.
-
-### چرا PostgreSQL؟
-پروژه چند process یا سرویس دارد که به داده پایدار مشترک دسترسی دارند. روابط، constraintها، transactionها، deduplication و queryهای مالکیت نیز مهم‌اند. PostgreSQL برای این نیازها انتخاب شده است.
+Message broker اضافه نشده است. افزودن آن فقط در صورت وجود نیاز واقعی به صف پایدار، backpressure یا پردازش موازی باید بررسی شود.
 
 ---
 
-## ۴. امنیت و جداسازی داده کاربران
+## ۵. تنظیمات LLM و امنیت Secretها
 
-**این الزام قطعی و حیاتی است.**
+تنظیمات گزارش‌شده:
 
-کاربر A نباید بتواند feed، خبر، تنظیمات، delivery یا تاریخچه مکالمه کاربر B را مشاهده، تغییر یا حذف کند.
+- Provider: AvalAI
+- Model: `gpt-6-luna`
+- Base URL: `https://api.avalai.ir/v1`
+- کلید API از متغیر محیطی `LLM_API_KEY`
+- timeout از تنظیمات محیطی
 
-الزامات:
-- کنترل مالکیت فقط در Telegram handler یا prompt مدل کافی نیست.
-- Repository / Data Access Layer باید مالکیت را در queryها و عملیات enforce کند.
-- دریافت شناسه رکورد به‌تنهایی نباید دسترسی بدهد.
-- عملیات update/delete باید شناسه رکورد را همراه با شناسه مالک معتبر بررسی کند.
-- Agent باید فقط خبرهای مجاز همان کاربر را retrieve کند.
-- تاریخچه مکالمه کاربران باید جدا بماند.
-- تست‌های A/B باید خواندن، تغییر، حذف، retrieval و history را پوشش دهند.
-- هویت کاربر در سرویس‌های داخلی باید به‌شکل معتبر منتقل شود؛ به شناسه غیرقابل اعتماد بدون بررسی اعتماد نکن.
-- محتوای RSS و پیام کاربران داده غیرقابل اعتماد است و نباید به‌عنوان دستور سیستمی اجرا شود.
-- ابزار جست‌وجوی مستقیم اینترنت نباید در اختیار Agent قرار بگیرد.
-- هیچ وعده‌ای درباره امنیت کامل prompt injection داده نشود؛ کنترل‌های قطعی باید در کد enforce شوند.
+نام متغیرها و مقادیر غیرحساس مؤثر را از فایل‌های تنظیمات و `.env.example` تأیید کن. فایل `.env` را چاپ نکن.
 
-### Secretها
-Token تلگرام، API key و رمز دیتابیس نباید در کد، Git، Docker image یا log ثبت شوند.
-- `.env` باید از Git و Docker build context کنار گذاشته شود.
-- `.env.example` فقط مقدار نمونه و غیرواقعی داشته باشد.
-- خروجی کامل تنظیمات Compose که ممکن است secret داشته باشد، چاپ نشود.
-- اگر secret وارد Git شده باشد، صرفاً حذف آن در commit بعدی کافی نیست؛ باید تعویض و سابقه بررسی شود.
+### سابقه خطای LLM
+
+در تست عملی قبلی، خطای `HTTP 429 — quota_exceeded` مشاهده شد. کاربر کلید API را تعویض کرد و پس از اصلاح Base URL، تأیید کرد که `/ask` پاسخ می‌دهد.
+
+این سابقه مربوط به کمبود اعتبار سرویس بود، نه اثبات وجود اشکال در منطق Agent.
+
+### مدیریت امن خطاها
+
+طبق گزارش قبلی، در پیاده‌سازی LLM:
+
+- متن خطای HTTP محدود می‌شود.
+- فیلدهای ساختاریافته خطا در صورت وجود استخراج می‌شوند.
+- Secretها و Tokenهای شناخته‌شده redact می‌شوند.
+- body کامل درخواست و پاسخ یا headerهای حساس نباید log شوند.
+- خطاهای ناشناخته باید به پیام عمومی امن تبدیل شوند.
+
+این موارد در Cleanup باید در کد و تست‌های موجود تأیید شوند.
 
 ---
 
-## ۵. مدل‌ها و وضعیت دیتابیس
+## ۶. Agent و بازیابی خبر
 
-زیرساخت دیتابیس ساخته شده است. هفت جدول اصلی:
+فایل‌های قبلی مربوط به Agent و LLM در ساختار قدیمی عبارت بودند از:
+
+- `src/ai_rss_news_assistant/agent.py`
+- `src/ai_rss_news_assistant/llm.py`
+- `tests/test_agent.py`
+- `tests/test_llm.py`
+
+پس از تغییر معماری، محل دقیق فایل‌ها ممکن است عوض شده باشد؛ مسیرهای فعلی را از repository پیدا کن.
+
+### رفتار مورد انتظار
+
+1. سؤال کاربر دریافت و اعتبارسنجی شود.
+2. Repository فقط خبرهای متعلق به همان کاربر را بازیابی کند.
+3. تعداد منابع و اندازه context محدود باشد.
+4. در نبود شواهد کافی، پاسخ صریح درباره نبود اطلاعات در خبرهای ذخیره‌شده ارائه شود.
+5. در نبود شواهد کافی، مدل بی‌دلیل فراخوانی نشود.
+6. پاسخ در صورت امکان عنوان و لینک منبع واقعی را ارائه کند.
+7. خطاهای Provider، timeout و پاسخ نامعتبر مدیریت شوند.
+8. Agent ابزار جست‌وجوی وب یا دریافت مستقیم اطلاعات زنده از اینترنت نداشته باشد.
+
+### محدودیت retrieval
+
+روش گزارش‌شده مبتنی بر keyword و رتبه‌بندی واژه‌ها و تازگی خبر است، نه semantic search. بنابراین مترادف‌ها یا بازنویسی‌های معنایی ممکن است خبر مرتبط را پیدا نکنند.
+
+برای این نسخه Vector DB یا embedding اضافه نشده است؛ تغییر این تصمیم باید فقط با دلیل فنی و بررسی هزینه و کیفیت انجام شود.
+
+### امنیت و مالکیت داده
+
+مهم‌ترین الزام امنیتی پروژه، جداسازی کامل داده کاربران است.
+
+کنترل مالکیت باید در لایه Repository و Data Access اعمال شود، نه صرفاً در Telegram handler یا prompt مدل.
+
+تست‌ها باید بررسی کنند که کاربر A نمی‌تواند Feed، خبر یا تاریخچه کاربر B را مشاهده، تغییر یا حذف کند. همچنین retrieval و context مدل نباید داده کاربر دیگر را شامل شوند.
+
+متن RSS و سؤال کاربر داده غیرقابل اعتماد محسوب می‌شوند. متن‌های حاوی دستور نباید اختیار برنامه، دسترسی به Secretها یا مرز مالکیت داده را تغییر دهند.
+
+---
+
+## ۷. RSS Worker و مدیریت Feed
+
+### رفتار مورد انتظار Worker
+
+- polling دوره‌ای با تنظیم قابل‌تغییر؛ مقدار پیش‌فرض گزارش‌شده `POLL_INTERVAL_SECONDS=300` است.
+- امکان کنترل دریافت متن کامل خبر با `FETCH_FULL_TEXT`؛ مقدار پیش‌فرض گزارش‌شده `true`.
+- timeout دریافت متن کامل با `FETCH_TIMEOUT_SECONDS`؛ مقدار پیش‌فرض گزارش‌شده ۳۰ ثانیه.
+- جلوگیری از پردازش تکراری خبر.
+- حفظ خلاصه موجود در صورت شکست دریافت متن کامل.
+- استفاده صحیح از transaction و rollback.
+- جداسازی خطای یک Feed یا خبر از بقیه پردازش‌ها.
+- مدیریت خطاهای RSS/Atom و URLهای نامعتبر یا غیرقابل دسترس.
+
+### امنیت URL
+
+در پیاده‌سازی قبلی، محدودیت scheme به HTTP/HTTPS، بررسی IPهای خصوصی و رزروشده، اعتبارسنجی redirect، timeout و محدودیت حجم پاسخ گزارش شده بود.
+
+حفاظت کامل در برابر DNS rebinding صرفاً با بررسی برنامه تضمین نمی‌شود؛ محدودیت egress شبکه نیز ممکن است لازم باشد.
+
+در Cleanup باید بررسی شود که این کنترل‌ها بعد از تغییر معماری هنوز برقرارند و مسیرهای مختلف دریافت URL آن‌ها را دور نمی‌زنند.
+
+### مدیریت Feed
+
+- جلوگیری از Feed تکراری برای یک کاربر.
+- امکان مشاهده و حذف فقط Feedهای متعلق به همان کاربر.
+- پیام خطای قابل فهم برای URL نامعتبر، timeout، خطای سرور، RSS/Atom نامعتبر و نبود آیتم قابل پردازش.
+- ثبت log مفید بدون افشای Secret یا اطلاعات حساس.
+
+---
+
+## ۸. ارسال خودکار و Delivery
+
+فرمان‌ها:
+
+- `/delivery`
+- `/delivery on`
+- `/delivery off`
+
+رفتار گزارش‌شده:
+
+- وضعیت ارسال خودکار برای هر کاربر در دیتابیس ذخیره می‌شود.
+- مقدار پیش‌فرض گزارش‌شده `auto_delivery_enabled=true` است.
+- وقتی ارسال خاموش است، Worker باید قبل از بازیابی خبرهای قابل ارسال و فراخوانی LLM از پردازش غیرضروری جلوگیری کند.
+- جدول `news_deliveries` دارای unique constraint گزارش‌شده روی `(user_id, news_item_id)` است.
+- خطای یک خبر یا کاربر نباید پردازش بقیه را متوقف کند.
+- خطاهای موقت Telegram ممکن است در pollingهای بعدی دوباره تلاش شوند.
+
+### محدودیت‌های شناخته‌شده
+
+- تضمین exactly-once وجود ندارد. ممکن است پیام در Telegram ارسال شود ولی ثبت delivery در دیتابیس commit نشود و ارسال مجدد رخ دهد.
+- خطای blocked user لزوماً باعث غیرفعال‌شدن دائمی کاربر نمی‌شود.
+- اجرای چند replica از Worker ممکن است بدون هماهنگی مناسب باعث race یا پردازش تکراری شود.
+- برای اثبات ارسال خودکار واقعی باید خبر جدید و واجد شرایط وجود داشته باشد.
+
+در Cleanup، این موارد را بررسی و مستند کن؛ اگر اصلاح آن‌ها مستلزم قابلیت جدید یا تغییر طراحی گسترده باشد، ابتدا شواهد و پیشنهاد را ارائه بده و تصمیم را با کاربر هماهنگ کن.
+
+---
+
+## ۹. دیتابیس و Migration
+
+فناوری‌ها:
+
+- PostgreSQL 16
+- SQLAlchemy Async
+- `asyncpg`
+- Alembic
+
+جداول شناخته‌شده در طراحی قبلی:
+
 - `users`
 - `user_feeds`
 - `news_items`
@@ -117,232 +341,202 @@ Token تلگرام، API key و رمز دیتابیس نباید در کد، Git
 - `chat_messages`
 - `message_citations`
 
-تصمیم‌های ثبت‌شده:
-- وضعیت پیش‌فرض ارسال خودکار برای کاربر جدید `true` است.
-- اولین polling هر feed تا ۱۰ آیتم اخیر را پردازش می‌کند؛ در صورت فعال بودن ارسال خودکار، آیتم‌های اولیه هم ممکن است خلاصه و ارسال شوند.
-- retention خبرها ۳۰ روز است.
-- حذف feed باید خبرهای متعلق به همان feed را حذف کند.
-- هر news item به یک user و یک feed تعلق دارد؛ association table بین feed و news در طراحی فعلی وجود ندارد.
+Migrationهای شناخته‌شده:
 
-### URL normalization و deduplication
-ماژول `src/ai_rss_news_assistant/db/url_normalization.py` شامل `normalize_url()` است.
-
-منطق گزارش‌شده:
-- scheme و hostname به حروف کوچک تبدیل می‌شوند.
-- پورت پیش‌فرض حذف می‌شود.
-- fragment حذف می‌شود.
-- پارامترهای شناخته‌شده tracking مانند `utm_*`, `fbclid`, `gclid`, `ref`, `_ga`, `_gl`, `mc_cid`, `mc_eid` حذف می‌شوند.
-- سایر query parameterها حفظ می‌شوند.
-
-Unique constraint مربوط به dedup برابر `(user_id, normalized_url)` است؛ بنابراین یک کاربر نمی‌تواند همان URL نرمال‌شده را چند بار ثبت کند، اما کاربران مختلف می‌توانند همان URL را داشته باشند.
-
-**ریسک شناخته‌شده:** migration دوم ممکن است هنگام backfill با URLهای تکراری موجود برای یک کاربر به unique constraint برخورد کند. این حالت روی دیتابیس تازه آزمایش نشده است؛ قبل از اعمال migration روی دیتابیس دارای داده واقعی باید duplicateهای احتمالی بررسی شوند.
-
----
-
-## ۶. Migration و Docker
-
-Migrationهای موجود:
 - `0001_initial_schema`
 - `0002_add_normalized_url`
 
-Migrationها خودکار در startup سرویس Bot یا Worker اجرا نمی‌شوند؛ اجرای آن‌ها مرحله‌ای صریح است.
+Migrationها نباید بدون بررسی در startup عادی Bot یا Worker اجرا شوند. طبق معماری گزارش‌شده، سرویس `migrate` فرمان `alembic upgrade head` را اجرا می‌کند.
 
-### تغییرات ثبت‌شده
-- `Dockerfile` فایل `alembic.ini` و پوشه `alembic/` را در image کپی می‌کند.
-- `.dockerignore` اضافه شده و `.env`، `.venv/`، cacheها، `.git/` و فایل‌های محلی غیرضروری را از build context کنار می‌گذارد.
-- سرویس one-off با نام `migrate` در `compose.yaml` وجود دارد.
-- این سرویس از همان Dockerfile استفاده می‌کند، منتظر healthy شدن `db` می‌ماند، `DATABASE_URL` می‌گیرد و `alembic upgrade head` را اجرا می‌کند.
-- Migration به‌صورت خودکار در startup Bot/Worker اجرا نمی‌شود.
-- README workflow مربوط به migration را مستند می‌کند.
+**هشدار دائمی:** دیتابیس ممکن است حاوی داده واقعی باشد. هیچ Volumeای را حذف نکن و از `docker compose down -v`، reset دیتابیس یا downgrade بدون بررسی و اجازه صریح استفاده نکن.
 
-فرمان‌های ثبت‌شده:
+---
+
+## ۱۰. وضعیت تست و کیفیت
+
+### گزارش پیش از Merge معماری
+
+آخرین گزارش معماری اعلام کرده بود:
+
+| بررسی | نتیجه گزارش‌شده |
+|---|---|
+| `uv run pytest -q` | 299 passed |
+| Ruff check | موفق |
+| Ruff format check برای فایل‌های جدید مشخص‌شده | موفق |
+| `docker compose config --quiet` | موفق |
+| `git diff --check` | موفق برای تغییرات گزارش‌شده |
+| بررسی importها و مرز سرویس‌ها | موفق |
+| Docker runtime و ارتباط واقعی Bot-Agent | هنوز تأیید نشده |
+
+در گزارش قدیمی‌تر پروژه، ۱۹۵ تست موفق گزارش شده بود. این عدد قدیمی است و نباید با گزارش جدید معماری اشتباه گرفته شود.
+
+### قواعد گزارش تست
+
+- این نتایج، گزارش‌های قبلی‌اند و نه اجرای جدید در این لحظه.
+- در Cleanup ابتدا وضعیت واقعی تست‌ها و تغییرات را بررسی کن.
+- تست‌های مرتبط با هر تغییر را اجرا کن.
+- در پایان، تست کامل و Ruff را در صورت امکان اجرا کن.
+- خروجی واقعی و خطاهای باقی‌مانده را ثبت کن.
+- هیچ تستی را موفق اعلام نکن مگر اینکه واقعاً اجرا شده و نتیجه آن بررسی شده باشد.
+
+فرمان‌های معمول:
 
 ```bash
-# Apply migrations
-docker compose up migrate
-
-# Alternative one-off invocation
-docker compose run --rm migrate
-
-# Inspect current revision
-docker compose run --rm migrate current
+uv run pytest -q
+uv run ruff check .
 ```
 
-### Validation گزارش‌شده
-طبق گزارش OpenCode:
-- `uv run pytest -q`: 42 passed.
-- Ruff check موفق.
-- Ruff format موفق؛ 17 فایل از قبل format شده بودند.
-- Docker image با موفقیت build شد و فایل‌های Alembic در `/app/` تأیید شدند.
-- هر دو migration روی PostgreSQL 16 دورریختنی اجرا شدند.
-- `alembic current` نسخه `0002_add_normalized_url (head)` را تأیید کرد.
-- منابع آزمایشی پاک شدند و volume اصلی `db_data` استفاده یا تغییر داده نشد.
-
-این نتایج از گزارش OpenCode آمده‌اند. بی‌دلیل تست‌های پرهزینه را تکرار نکن؛ در صورت نیاز به بررسی مجدد، دلیل و محدوده را مشخص کن.
-
----
-
-## ۷. Git و commitهای شناخته‌شده
-
-آخرین وضعیت گزارش‌شده:
-- Branch: `feat/database-layer`
-- Working tree: clean
-- آخرین commit: `ecc9919 docs: document alembic migration workflow`
-- هیچ push یا merge انجام نشده است.
-
-سه commit مربوط به اصلاح migration:
-- `26abde7 fix: include alembic in image and add .dockerignore for build context`
-- `93a4ce4 feat: add alembic migrate service for explicit schema updates`
-- `ecc9919 docs: document alembic migration workflow`
-
-Commitهای قبلی:
-- `c55d71e fix: enforce per-user cross-feed news deduplication`
-- `882fde6 fmt: apply ruff formatting to db module`
-- `56f0898 test: add database isolation and cascade delete tests`
-- `f037bfe dep: add aiosqlite dev dependency for async SQLite testing`
-- `c292dd0 fix: remove redundant index=True declarations from model columns`
-- `3052489 fix: ignore extra env vars in Settings; skip local .env in tests`
-- `b490341 feat: add Alembic initial migration for database schema`
-- `faf7906 feat: add SQLAlchemy domain models with per-user ownership and cascade deletes`
-- `724a723 feat: add database session management with async SQLAlchemy engine`
-- `073e102 chore: add SQLAlchemy, asyncpg, and Alembic dependencies`
-
-قبل از هر کار جدید، وضعیت واقعی را بررسی کن:
+اعتبارسنجی تنظیمات Compose، در صورت مناسب بودن محیط:
 
 ```bash
-git status --short --branch
-git log --oneline -5
+docker compose config --quiet
 ```
 
-این وضعیت ممکن است تغییر کرده باشد؛ آن را قطعی فرض نکن. Push، merge، branch switch یا عملیات مخرب Git بدون اجازه صریح ممنوع است.
+این دستور صرفاً تنظیمات Compose را بررسی می‌کند و سلامت runtime را ثابت نمی‌کند.
 
 ---
 
-## ۸. کارهای باقی‌مانده
+## ۱۱. سابقه اجرای عملی
 
-Repository / Data Access Layer مراحل زیر در بخش `feat/repository-layer` پیاده‌سازی و تست شده‌اند:
-- `users`: get/create/update/deactivate (commit `aea98f3`)
-- `user_feeds`: create/get/list/update/delete با مالکیت در query (commit `aea98f3`)
-- `news_items`: create/get/list با مالکیت در query و تکرار نشدن `normalized_url` برای هر کاربر (commit فعلی)
-- `news_deliveries`: create/get/list با مالکیت در query و تکرار نشدن `(user_id, news_item_id)` (commit فعلی)
+در نسخه قبلی، کاربر گزارش کرده است که:
 
-کارهای اصلی محصول:
-- Telegram handlers و فرمان‌های مدیریت feed
-- RSS fetching/parsing و scheduling
-- LLM summarization
-- delivery state و ارسال مقاوم در برابر retry
-- Agent retrieval و پاسخ grounded همراه با citation
-- مدیریت خطا، retry و logging
-- integration tests و اجرای end-to-end
-- تکمیل README و مستندسازی تصمیم‌های معماری
+- Bot و Worker با Docker Compose اجرا شده‌اند.
+- PostgreSQL healthy بوده است.
+- سرویس Migration با `Exited (0)` پایان یافته است.
+- فرمان‌های Telegram کار کرده‌اند.
+- `/news` موفق بوده است.
+- `/ask` پس از اصلاح Base URL و تعویض کلید API پاسخ داده است.
+- فرمان‌های ON/OFF ارسال خودکار تست شده‌اند.
 
-موارد فنی مطرح‌شده در audit قبلی که فعلاً فقط باید در صورت ارتباط بررسی شوند:
-- احتمال تفاوت نام برخی composite foreign keyها بین مدل‌ها و migrationها و در نتیجه احتمال Alembic autogenerate drift.
-- `updated_at` با `onupdate=func.now()` در ORM الزاماً trigger سطح دیتابیس ایجاد نمی‌کند.
-- احتمال index اضافی روی `users.telegram_user_id`، چون `unique=True` معمولاً خودش unique index ایجاد می‌کند.
-- رفتار cascade مربوط به citationها هنگام حذف feed/news باید در تست‌ها صریحاً بررسی شود.
+این نتایج مربوط به اجرای قبلی‌اند. پس از تغییر معماری، باید وضعیت runtime فعلی را مستقلاً بررسی کرد.
 
-در مرحله فعلی، scope را بی‌دلیل گسترش نده و schema یا migration را تغییر نده، مگر blocker واقعی پیدا شود؛ در آن صورت ابتدا گزارش بده.
+### وضعیت Docker در معماری جدید
 
-طبق بررسی قبلی، Repository / Data Access Layer هنوز پیاده‌سازی نشده بود؛ این موضوع باید با audit read-only جدید تأیید شود.
+طبق گزارش قبلی:
 
-کارهای اصلی محصول:
-- Repositoryها و عملیات امن per-user
-- Telegram handlers و فرمان‌های مدیریت feed
-- RSS fetching/parsing و scheduling
-- deduplication و ذخیره خبر
-- LLM summarization
-- delivery state و ارسال مقاوم در برابر retry
-- Agent retrieval و پاسخ grounded همراه با citation
-- مدیریت خطا، retry و logging
-- integration tests و اجرای end-to-end
-- تکمیل README و مستندسازی تصمیم‌های معماری
+- `docker compose config --quiet` موفق بوده است.
+- imageها در گزارش قبلی معماری build یا runtime جدید را اثبات نکرده‌اند.
+- اجرای واقعی Docker، healthcheckها و ارتباط Bot با Agent هنوز تأیید نشده بود.
 
-موارد فنی مطرح‌شده در audit قبلی که فعلاً فقط باید در صورت ارتباط بررسی شوند:
-- احتمال تفاوت نام برخی composite foreign keyها بین مدل‌ها و migrationها و در نتیجه احتمال Alembic autogenerate drift.
-- `updated_at` با `onupdate=func.now()` در ORM الزاماً trigger سطح دیتابیس ایجاد نمی‌کند.
-- احتمال index اضافی روی `users.telegram_user_id`، چون `unique=True` معمولاً خودش unique index ایجاد می‌کند.
-- رفتار cascade مربوط به citationها هنگام حذف feed/news باید در تست‌ها صریحاً بررسی شود.
-
-در مرحله فعلی، scope را بی‌دلیل گسترش نده و schema یا migration را تغییر نده، مگر blocker واقعی پیدا شود؛ در آن صورت ابتدا گزارش بده.
+در Cleanup، این موضوع را به‌عنوان یک مورد مهم بررسی کن. هیچ سرویس یا کانتینری را بدون هماهنگی کاربر restart یا recreate نکن و داده‌های موجود را حفظ کن.
 
 ---
 
-## ۹. شیوه همکاری با OpenCode و Git
+## ۱۲. محدوده Cleanup
 
-- ابتدا branch و working tree را بررسی کن.
-- برای قدم بعدی، audit فقط‌خواندنی انجام بده؛ فعلاً تغییر کد نده.
-- هر prompt باید هدف، محدوده فایل‌ها، محدودیت‌ها، تست‌ها و گزارش نهایی را مشخص کند.
-- پس از implementation، diff و تست‌های مربوط را بررسی کن.
-- OpenCode باید خودش commitهای Conventional Commit معنادار بسازد، وقتی یک واحد منطقی و تست‌شده آماده است.
-- تعداد commitها متعادل باشد: نه commit برای هر تغییر جزئی، نه یک commit بزرگ برای کارهای نامرتبط.
-- Push، merge، branch switch و عملیات مخرب Git بدون اجازه صریح انجام نشود.
-- اگر Docker یا سرویس موردنیاز در محیط در دسترس نیست، محدودیت را گزارش کن؛ validation اجرا‌نشده را موفق اعلام نکن.
+**هدف این برنچ:** بررسی و اصلاح کیفیت نسخه فعلی، نه اجرای دوباره بازطراحی معماری و نه افزودن قابلیت‌های باقی‌مانده.
 
----
+موارد قابل بررسی:
 
-## ۱۰. قدم بعدی دقیق
+1. ساختار فایل‌ها، importها و مرز Bot، Agent و Worker.
+2. کد تکراری، وابستگی‌های غیرضروری و پیچیدگی‌های قابل اجتناب.
+3. مدیریت خطا، logging و رفتار retry.
+4. جداسازی داده کاربران در Repository و Agent.
+5. امنیت URL، RSS، Prompt Injection و Secretها.
+6. تنظیمات و مرزهای دیتابیس و Migration.
+7. تست‌های موجود، تست‌های شکننده و پوشش رفتارهای مهم.
+8. Dockerfileها، Compose، healthcheck و readiness.
+9. README و هماهنگی مستندات با کد واقعی.
+10. قالب‌بندی، lint و کیفیت کلی کد.
 
-### مرحله فعلی: Repository / Data Access Layer — بخش News + Deliveries انجام شده
+### قواعد اصلاح
 
-Repository / Data Access Layer برای `users` و `user_feeds` (commit `aea98f3`) و برای `news_items` و `news_deliveries` (commit فعلی) پیاده‌سازی و تست شده است. هر عملیات خواندن/به‌روزرسانی/حذف مالکیت را در query enforce می‌کند.
-
-### قدم بعدی: Repository برای `conversations`، `chat_messages` و `message_citations`
-
-پolishing و تکمیل Repositoryهای قبلی، سپس پیاده‌سازی Repository برای `conversations`، `chat_messages` و `message_citations` با mesma الگو مالکیت در query.
-
-### مرحله فعلی: Repository / Data Access Layer — فقط audit
-
-از OpenCode بخواه وضعیت واقعی را بررسی کند و چیزی را تغییر ندهد. باید مشخص شود:
-- آیا Repository یا data-access module وجود دارد یا نه؛
-- ساختار package و ماژول‌های فعلی چیست؛
-- مدل‌ها و session management چگونه پیاده‌سازی شده‌اند؛
-- برای هر entity چه عملیات‌هایی لازم‌اند؛
-- کدام queryها مالکیت را enforce می‌کنند؛
-- تست‌های موجود کدام حالت‌های isolation و cascade را پوشش می‌دهند؛
-- کوچک‌ترین مرحله منطقی برای پیاده‌سازی چیست.
-
-پس از دریافت گزارش، آن را بررسی کن و سپس Repositoryها را مرحله‌ای همراه با تست‌های مالکیت پیاده‌سازی کن. هدف سرعت بیشتر است؛ audit را محدود و نتیجه‌محور نگه دار.
-
-### Prompt آماده برای OpenCode
-
-```text
-Perform a strictly read-only audit of the Repository / Data Access Layer in the current AI RSS News Assistant Bot repository.
-
-Do not modify files, create commits, switch branches, push, merge, reset, run migrations, or alter any database or persistent volume. Do not expose secrets or print the full output of Docker Compose configuration.
-
-1. Report the current Git branch, working-tree status, and the last five commits.
-2. Inspect the source tree and determine whether any repository/data-access layer already exists. Do not assume it is absent.
-3. Inspect SQLAlchemy models, database session/engine setup, Alembic migrations, and current database-related tests.
-4. For each entity/table, list the expected read/create/update/delete operations and whether ownership is enforced by query conditions or database constraints.
-5. Trace existing ownership controls for feeds, news items, deliveries, conversations, chat messages, and citations. Distinguish implemented controls from planned controls.
-6. Review existing tests for cross-user isolation. Identify missing tests for read, update, delete, retrieval, conversation history, and cascade behavior.
-7. Identify relevant implementation blockers or schema/model inconsistencies, but do not fix them.
-8. Recommend the smallest coherent next implementation step. Keep existing models and migrations unchanged during this audit.
-
-Return a concise report with exact file paths, confirmed findings versus assumptions, test coverage, risks, and a proposed implementation sequence. Do not implement anything or create commits.
-```
-
-پس از audit، گزارش را بررسی کن و اولین واحد کوچک Repository را با تست‌های ownership اجرا کن. بعد از milestone، همین context را به‌روزرسانی کن.
+- قبل از تغییر، کد و تست مرتبط را بخوان.
+- ابتدا مشکل را دقیق مشخص کن و اثر آن را توضیح بده.
+- تغییرات کوچک و قابل بازبینی باشند.
+- پس از هر اصلاح، تست مرتبط را اجرا کن.
+- از بازنویسی کامل فایل‌ها بدون دلیل خودداری کن.
+- رفتارهای سالم موجود را حفظ کن.
+- قابلیت جدیدی را فقط به دلیل مشاهده یک نیازمندی ناقص در Cleanup اضافه نکن؛ آن را در فهرست شکاف‌ها ثبت کن.
+- اگر یک اصلاح برای حفظ امنیت یا صحت قابلیت موجود ضروری است، دلیل و محدوده آن را مشخص کن.
+- در صورت وجود چند راه‌حل، مزایا و معایب گزینه‌های اصلی را توضیح بده.
+- بدون اجازه کاربر commit، push، merge یا branch switch انجام نده.
 
 ---
 
-## ۱۱. واژه‌نامه کوتاه
+## ۱۳. نیازمندی‌های باقی‌مانده برای مرحله بعد
 
-- **Repository / Data Access Layer:** بخش برنامه‌ای که خواندن و نوشتن داده را مدیریت می‌کند؛ باید عملیات را با مالکیت درست محدود کند.
+بعد از پایان Cleanup، باید نیازمندی‌های شرکت را با وضعیت واقعی repository تطبیق دهیم. موارد زیر یک فهرست اولیه‌اند، نه ادعای ناقص‌بودن قطعی همه آن‌ها:
+
+- تکمیل رفتارهای مدیریت Feed و پیام‌های خطای کاربرپسند.
+- بررسی deduplication و جلوگیری از ارسال تکراری.
+- اطمینان از پایداری ON/OFF بعد از restart.
+- بررسی خطاهای blocked user، rate limit و retry.
+- تکمیل تست جداسازی داده کاربران.
+- بررسی اینکه پاسخ Agent بدون شواهد کافی به دانش عمومی مدل متکی نشود.
+- تأیید مسیر کامل ingestion تا خلاصه‌سازی و ارسال خودکار.
+- تأیید runtime واقعی Bot، Worker، Agent و PostgreSQL در Compose.
+- تکمیل مستندات نصب، تنظیم محیط، اجرا، مشاهده logها، توقف سرویس‌ها و محدودیت‌ها.
+- ثبت تصمیم‌های معماری و علت انتخاب فناوری‌ها.
+
+پس از Cleanup، این موارد باید با شواهد کد، تست و اجرای عملی به سه دسته تقسیم شوند: تکمیل‌شده، ناقص و پیاده‌سازی‌نشده.
+
+سپس برنچ جداگانه‌ای برای توسعه نیازمندی‌های باقی‌مانده ایجاد می‌شود. نام آن هنوز قطعی نیست.
+
+---
+
+## ۱۴. وضعیت فعلی و قدم بعدی
+
+### Milestone A — زیرساخت RSS و دیتابیس
+
+پیاده‌سازی اصلی در نسخه قبلی انجام شده بود. polling، ingestion، ذخیره پایدار، deduplication و Migration گزارش شده‌اند.
+
+### Milestone B — Bot و مدیریت Feed
+
+فرمان‌های پایه، مدیریت Feed و `/news` در اجرای قبلی تست شده‌اند.
+
+### Milestone C — LLM و Delivery
+
+خلاصه‌سازی، ارسال خودکار و ON/OFF پیاده‌سازی شده و در گزارش‌های قبلی تست شده‌اند. ارسال خودکار یک خبر تازه در مسیر کامل باید با شواهد واقعی تأیید شود.
+
+### Milestone D — Agent
+
+پاسخ‌گویی مبتنی بر خبرهای ذخیره‌شده پیاده‌سازی شده و `/ask` در اجرای قبلی تست شده است. retrieval مبتنی بر keyword است و محدودیت‌های معنایی دارد.
+
+### Milestone E — جداسازی معماری
+
+**وضعیت: PR معماری طبق تأیید کاربر Merge شده است.**
+
+طبق گزارش قبلی، Bot، Agent و Worker به سرویس‌ها و مرزهای جداگانه منتقل شده‌اند. تعداد ۲۹۹ تست موفق و چند بررسی ایستا گزارش شده‌اند؛ این نتایج هنوز دوباره اجرا نشده‌اند.
+
+### Milestone F — Cleanup
+
+**وضعیت: برنچ جدید ساخته شده؛ بررسی Cleanup هنوز شروع نشده است.**
+
+قدم‌های بعدی:
+
+1. بررسی `git status --short --branch` و چند کامیت آخر.
+2. تأیید نام برنچ فعال و اینکه از نسخه Mergeشده ساخته شده است.
+3. بررسی ساختار واقعی فایل‌ها و تست‌های موجود.
+4. تهیه فهرست محدود از مشکلات واقعی، با مسیر فایل و شواهد.
+5. انتخاب اولین اصلاح کوچک و اجرای تست مرتبط.
+6. بررسی تدریجی امنیت، مرز سرویس‌ها، Docker و مستندات.
+7. اجرای تست‌های نهایی و ثبت موارد تأییدنشده.
+8. پایان Cleanup و سپس آغاز برنچ جداگانه برای نیازمندی‌های باقی‌مانده.
+
+**اولویت فعلی:** اول وضعیت واقعی پروژه را مشخص کن؛ نه اینکه بلافاصله همه تست‌ها را تکرار یا ساختار را دوباره بازنویسی کنی.
+
+---
+
+## ۱۵. واژه‌نامه کوتاه
+
+- **Repository / Data Access Layer:** لایه خواندن و نوشتن داده که باید مالکیت رکورد را enforce کند.
 - **Migration:** تغییر نسخه‌بندی‌شده ساختار دیتابیس.
-- **Foreign key:** قیدی که رابطه معتبر بین رکوردها را حفظ می‌کند.
-- **Unique constraint:** جلوگیری از تکرار یک مقدار یا ترکیب مشخص.
-- **Isolation:** جلوگیری از دسترسی یا اثرگذاری یک کاربر روی داده کاربر دیگر.
-- **Idempotency:** اجرای دوباره یک عملیات بدون اثر تکراری ناخواسته.
-- **RAG / Retrieval:** پیدا کردن داده مرتبط و استفاده از آن برای پاسخ مستند.
-- **Prompt injection:** محتوای غیرقابل اعتمادی که تلاش می‌کند رفتار مدل را از قواعد اصلی منحرف کند.
-- **Health check:** بررسی خودکار سلامت یا آمادگی سرویس.
-- **Trade-off:** بده‌بستان میان مزایا، هزینه‌ها و محدودیت‌های یک انتخاب.
+- **Unique constraint:** جلوگیری از ثبت مقدار یا ترکیب تکراری.
+- **Isolation:** جلوگیری از دسترسی یک کاربر به داده کاربر دیگر.
+- **Idempotency:** جلوگیری از اثر تکراری ناخواسته در اجرای مجدد عملیات.
+- **RAG / Retrieval:** بازیابی داده مرتبط برای تولید پاسخ مستند.
+- **Prompt injection:** تلاش محتوای غیرقابل اعتماد برای منحرف کردن رفتار مدل.
+- **Health check:** بررسی خودکار سلامت سرویس.
+- **Worker:** فرایند پس‌زمینه برای کارهای دوره‌ای.
+- **Polling:** بررسی منظم یک منبع در بازه‌های زمانی مشخص.
+- **Delivery:** ثبت و ارسال خبر به کاربر.
+- **Grounded answer:** پاسخی متکی به شواهد مشخص از داده‌های مجاز.
+- **Cleanup:** اصلاح و تثبیت کدهای موجود، بدون توسعه عمدی قابلیت‌های جدید.
+- **Pull Request (PR):** درخواست بررسی و ادغام مجموعه‌ای از تغییرات در برنچ مقصد.
 
 ---
 
 **پایان سند مرجع پروژه**
 
-این سند برای انتقال سریع context است، نه جایگزین repository واقعی، نیازمندی‌های شرکت یا نتایج تازه تست‌ها. وضعیت Git، فایل‌ها و تست‌ها را پیش از هر تغییر جدید تأیید کن.
+این سند برای انتقال سریع context است، نه جایگزین repository واقعی، نیازمندی‌های شرکت یا نتایج تازه تست‌ها. در صورت تعارض، وضعیت واقعی Git، کد، تست‌ها و مشخصات شرکت را بررسی کن. از شروع دوباره کارهایی که معتبر و تکمیل‌شده‌اند خودداری کن و هیچ نتیجه گزارش‌شده قدیمی را بدون بررسی، نتیجه قطعی فعلی اعلام نکن.

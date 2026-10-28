@@ -19,25 +19,17 @@ import uuid
 
 import httpx
 
-from ai_rss_news_assistant.contracts import AgentAnswer, AnswerRequest, AnswerStatus
+from ai_rss_news_assistant.contracts import (
+    FAILURE_HTTP_STATUSES,
+    AgentAnswer,
+    AnswerRequest,
+    answer_status_for_http_status,
+)
 
 logger = logging.getLogger(__name__)
 
 ANSWER_PATH = "/answer"
 HEALTH_PATH = "/health"
-
-# HTTP status -> answer status. 401/403 means the bot itself is misconfigured
-# (wrong or missing token), which the user experiences as "not available";
-# 422 means our own validation disagreed with the agent's, which is a bug on
-# this side rather than something the user can influence.
-_STATUS_BY_HTTP_CODE: dict[int, AnswerStatus] = {
-    401: "unavailable",
-    403: "unavailable",
-    422: "provider_error",
-    502: "provider_error",
-    503: "unavailable",
-    504: "timeout",
-}
 
 
 class UnavailableAnswerer:
@@ -91,13 +83,15 @@ class AgentHTTPClient:
         if response.status_code == httpx.codes.OK:
             return _parse_answer(response)
 
-        status_name = _STATUS_BY_HTTP_CODE.get(response.status_code)
-        if status_name is None:
+        if response.status_code not in FAILURE_HTTP_STATUSES:
             logger.warning("Agent returned unexpected HTTP %s", response.status_code)
-            return AgentAnswer.for_status("provider_error")
 
+        # The reverse mapping comes from the shared contract module, so this
+        # client cannot disagree with the agent about what a code means.
         logger.warning("Agent returned HTTP %s", response.status_code)
-        return AgentAnswer.for_status(status_name)
+        return AgentAnswer.for_status(
+            answer_status_for_http_status(response.status_code)
+        )
 
 
 def _parse_answer(response: httpx.Response) -> AgentAnswer:

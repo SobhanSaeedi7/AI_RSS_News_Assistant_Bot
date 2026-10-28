@@ -1,17 +1,3 @@
-"""URL normalization helpers for news deduplication.
-
-Canonicalizes article URLs so that the same article arriving through
-different feeds can be detected as a duplicate, without collapsing
-potentially distinct article URLs.
-
-Normalization is conservative:
-* Scheme and hostname are lowercased.
-* Default ports (http:80, https:443) are removed.
-* Fragments are removed.
-* Tracking-only query parameters are removed.
-* All other query parameters, path, and hostname are preserved.
-"""
-
 from __future__ import annotations
 
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit

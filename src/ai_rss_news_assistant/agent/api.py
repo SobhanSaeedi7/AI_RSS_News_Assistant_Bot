@@ -52,26 +52,20 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ai_rss_news_assistant.agent.answer import NewsAgent
 from ai_rss_news_assistant.config import AgentSettings
-from ai_rss_news_assistant.contracts import MAX_QUESTION_CHARS, AgentAnswer
+from ai_rss_news_assistant.contracts import (
+    ANSWER_STATUS_HTTP_STATUS,
+    MAX_QUESTION_CHARS,
+    AgentAnswer,
+)
 
 logger = logging.getLogger(__name__)
 
+# The failure statuses themselves come from the shared contract table; these
+# are the codes this module raises or returns directly.
 HTTP_200_OK = status.HTTP_200_OK
 HTTP_401_UNAUTHORIZED = status.HTTP_401_UNAUTHORIZED
 HTTP_500_INTERNAL_SERVER_ERROR = status.HTTP_500_INTERNAL_SERVER_ERROR
-HTTP_502_BAD_GATEWAY = status.HTTP_502_BAD_GATEWAY
 HTTP_503_SERVICE_UNAVAILABLE = status.HTTP_503_SERVICE_UNAVAILABLE
-HTTP_504_GATEWAY_TIMEOUT = status.HTTP_504_GATEWAY_TIMEOUT
-
-# Answer status -> HTTP status. Only the outcomes that mean "no answer was
-# produced" become HTTP failures; the rest are successful answers.
-_STATUS_BY_ANSWER_STATUS: dict[str, int] = {
-    "insufficient_evidence": HTTP_200_OK,
-    "empty_question": HTTP_200_OK,
-    "unavailable": HTTP_503_SERVICE_UNAVAILABLE,
-    "timeout": HTTP_504_GATEWAY_TIMEOUT,
-    "provider_error": HTTP_502_BAD_GATEWAY,
-}
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -170,7 +164,9 @@ async def answer(
             AgentAnswer.for_status("provider_error"),
         )
 
-    status_code = _STATUS_BY_ANSWER_STATUS.get(answer_object.status, HTTP_200_OK)
+    # The mapping is the shared contract table, not a local copy, so the bot's
+    # reverse mapping cannot disagree with what this endpoint returns.
+    status_code = ANSWER_STATUS_HTTP_STATUS.get(answer_object.status, HTTP_200_OK)
     return _payload_response(status_code, answer_object)
 
 

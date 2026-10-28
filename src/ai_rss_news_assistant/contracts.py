@@ -55,15 +55,77 @@ ANSWER_TEXT_BY_STATUS: dict[str, str] = {
 
 _KNOWN_STATUSES = frozenset(ANSWER_TEXT_BY_STATUS) | {"answered"}
 
+# --- HTTP transport mapping -------------------------------------------------
+#
+# One authoritative pair of tables, imported by both sides of the wire:
+#
+# * the agent turns an answer status into an HTTP status (``/answer``);
+# * the bot turns a failed HTTP status back into an answer status.
+#
+# They live here, next to the statuses themselves, so the two services cannot
+# disagree about what a code means. Keeping a copy in each service is exactly
+# the drift this module exists to prevent.
+
+ANSWER_STATUS_HTTP_STATUS: dict[AnswerStatus, int] = {
+    "answered": 200,
+    "insufficient_evidence": 200,
+    "empty_question": 200,
+    "unavailable": 503,
+    "timeout": 504,
+    "provider_error": 502,
+}
+
+# Only failures are mapped back: a 200 response carries its status in the body,
+# because both a grounded answer and an insufficient-evidence answer succeed.
+_FAILURE_HTTP_ANSWER_STATUS: dict[int, AnswerStatus] = {
+    # Missing/wrong internal token or an unconfigured provider: the caller
+    # cannot ask right now, which is different from "the answer failed".
+    401: "unavailable",
+    403: "unavailable",
+    422: "provider_error",  # our own validation disagreed: a bug on this side
+    500: "provider_error",
+    502: "provider_error",
+    503: "unavailable",
+    504: "timeout",
+}
+
+FAILURE_HTTP_STATUSES = frozenset(_FAILURE_HTTP_ANSWER_STATUS)
+
+
+def answer_status_for_http_status(status_code: int) -> AnswerStatus:
+    """Return the answer status a failed HTTP response represents.
+
+    A successful response is deliberately not mapped: its body states the
+    status. Any code the agent does not document is treated as an upstream
+    failure rather than as an answer.
+    """
+    return _FAILURE_HTTP_ANSWER_STATUS.get(status_code, "provider_error")
+
+
+def answer_status_for_llm_error(kind: str) -> AnswerStatus:
+    """Translate an LLM failure classification into an answer status.
+
+    ``kind`` is :attr:`ai_rss_news_assistant.llm.LLMError.kind`, passed as a
+    plain string so this module keeps its no-dependency contract and the bot
+    can import it without importing the provider client.
+    """
+    return "timeout" if kind == "timeout" else "provider_error"
+
 
 @dataclass(frozen=True)
 class AgentSource:
-    """A stored news item cited by an agent answer."""
+    """A stored news item cited by an agent answer.
+
+    ``citation_index`` is the number the model used in the answer (``[2]`` ->
+    ``2``). It is optional so a payload from an older agent, or a source built
+    by hand, still parses; the bot then falls back to the source's position.
+    """
 
     title: str
     url: str | None
     feed_title: str | None = None
     published_at: datetime | None = None
+    citation_index: int | None = None
 
     def to_payload(self) -> dict[str, Any]:
         """Return the JSON-serialisable form sent over the wire."""
@@ -74,6 +136,7 @@ class AgentSource:
             "published_at": (
                 self.published_at.isoformat() if self.published_at else None
             ),
+            "citation_index": self.citation_index,
         }
 
     @classmethod
@@ -89,12 +152,19 @@ class AgentSource:
         url = data.get("url")
         feed_title = data.get("feed_title")
         published_at = data.get("published_at")
+        citation_index = data.get("citation_index")
         if not isinstance(title, str):
             raise TypeError("source title must be a string")
         if url is not None and not isinstance(url, str):
             raise TypeError("source url must be a string or null")
         if feed_title is not None and not isinstance(feed_title, str):
             raise TypeError("source feed_title must be a string or null")
+        if citation_index is not None and (
+            not isinstance(citation_index, int)
+            or isinstance(citation_index, bool)
+            or citation_index < 1
+        ):
+            raise TypeError("source citation_index must be a positive integer or null")
 
         parsed_published_at: datetime | None = None
         if isinstance(published_at, str):
@@ -110,6 +180,7 @@ class AgentSource:
             url=url,
             feed_title=feed_title,
             published_at=parsed_published_at,
+            citation_index=citation_index,
         )
 
 

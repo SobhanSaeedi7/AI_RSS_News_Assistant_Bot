@@ -26,11 +26,11 @@ import logging
 import re
 import uuid
 
-from ai_rss_news_assistant.agent.errors import answer_status_for_llm_error
 from ai_rss_news_assistant.contracts import (
     MAX_QUESTION_CHARS,
     AgentAnswer,
     AgentSource,
+    answer_status_for_llm_error,
 )
 from ai_rss_news_assistant.db.models import NewsItem, UserFeed
 from ai_rss_news_assistant.db.repository import search_news_items
@@ -71,6 +71,9 @@ _USER_PROMPT = (
 _TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 # Untrusted text must not be able to close or open the real sources block.
 _DELIMITER_RE = re.compile(r"</?sources\s*>", re.IGNORECASE)
+# The model is asked to cite sources as [1], [2], ... . Only these markers are
+# used to decide which retrieved rows are actually part of the answer.
+_CITATION_RE = re.compile(r"\[(\d{1,3})\]")
 
 _STOPWORDS = {
     # Persian
@@ -217,13 +220,32 @@ def _untrusted(value: str | None) -> str:
     return _DELIMITER_RE.sub("[sources]", _clean(value))
 
 
-def _source_from_row(item: NewsItem, feed: UserFeed) -> AgentSource:
+def _source_from_row(
+    item: NewsItem, feed: UserFeed, *, citation_index: int | None = None
+) -> AgentSource:
     return AgentSource(
         title=_clean(item.title) or "بدون عنوان",
         url=safe_url(item.url),
         feed_title=_clean(feed.title) or None,
         published_at=item.published_at,
+        citation_index=citation_index,
     )
+
+
+def cited_source_indices(text: str, source_count: int) -> list[int]:
+    """Return the distinct, valid ``[n]`` citations in ``text``, in order.
+
+    A number outside ``1..source_count`` is a hallucinated citation: it is
+    ignored rather than turned into a source, so the bot can never show an
+    article the answer did not actually use. Duplicate markers are collapsed so
+    each source appears once.
+    """
+    indices: list[int] = []
+    for match in _CITATION_RE.finditer(text):
+        index = int(match.group(1))
+        if 1 <= index <= source_count and index not in indices:
+            indices.append(index)
+    return indices
 
 
 def _build_messages(
@@ -302,9 +324,24 @@ class NewsAgent:
         if not text.strip():
             return AgentAnswer.for_status("provider_error")
 
+        # Only rows the answer actually cites are returned. A retrieved article
+        # that the model did not use is not evidence for this answer, and an
+        # index the model invented has no row behind it, so neither can become
+        # a displayed source. If the model cites nothing, the answer is still
+        # grounded but has no sources to show.
+        cited = cited_source_indices(text, len(rows))
+        sources = [
+            _source_from_row(
+                rows[index - 1][0],
+                rows[index - 1][1],
+                citation_index=index,
+            )
+            for index in cited
+        ]
+
         return AgentAnswer(
             text=text[:MAX_ANSWER_CHARS],
-            sources=[_source_from_row(item, feed) for item, feed in rows],
+            sources=sources,
             grounded=True,
             status="answered",
         )

@@ -7,7 +7,7 @@ database query (never fetch-by-ID then check ownership in Python).
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select, text
@@ -28,6 +28,7 @@ from ai_rss_news_assistant.db.models import (
     UserFeed,
 )
 from ai_rss_news_assistant.db.repository import (
+    acquire_agent_lease,
     create_conversation,
     create_delivery,
     create_feed,
@@ -51,6 +52,11 @@ from ai_rss_news_assistant.db.repository import (
     list_message_citations,
     list_messages,
     list_news_items,
+    mark_delivery_unavailable,
+    mark_recipient_available,
+    record_delivery_run,
+    release_agent_lease,
+    toggle_auto_delivery,
     update_feed,
     update_user_settings,
 )
@@ -205,6 +211,65 @@ async def test_update_user_settings() -> None:
         fetched = await get_user_by_id(session, user.id)
         assert fetched.auto_delivery_enabled is False
         assert fetched.is_active is False
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_update_user_settings_delivery_interval() -> None:
+    session = await _create_session()
+    try:
+        user = await create_user(session, telegram_user_id=445)
+        assert user.delivery_interval_seconds == 0
+        assert user.last_delivered_at is None
+
+        updated = await update_user_settings(
+            session, user.id, delivery_interval_seconds=21600
+        )
+        assert updated is not None
+        assert updated.delivery_interval_seconds == 21600
+        # Changing the cadence must not flip the ON/OFF switch.
+        assert updated.auto_delivery_enabled is True
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_update_user_settings_rejects_a_negative_interval() -> None:
+    session = await _create_session()
+    try:
+        user = await create_user(session, telegram_user_id=446)
+        with pytest.raises(ValueError):
+            await update_user_settings(session, user.id, delivery_interval_seconds=-1)
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_record_delivery_run_updates_only_the_timestamp() -> None:
+    session = await _create_session()
+    try:
+        user = await create_user(
+            session, telegram_user_id=447, auto_delivery_enabled=False
+        )
+        moment = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+
+        assert await record_delivery_run(session, user.id, moment) is True
+
+        fetched = await get_user_by_id(session, user.id)
+        assert fetched.last_delivered_at == moment
+        assert fetched.auto_delivery_enabled is False
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_record_delivery_run_missing_user() -> None:
+    session = await _create_session()
+    try:
+        assert (
+            await record_delivery_run(session, uuid.uuid4(), datetime.now(UTC)) is False
+        )
     finally:
         await _close_session(session)
 
@@ -966,5 +1031,141 @@ async def test_delete_conversation_cascades_to_messages_and_citations() -> None:
 
         citations = await list_message_citations(session, user.id, message.id)
         assert citations == []
+    finally:
+        await _close_session(session)
+
+
+# --- recipient status, agent lease, and stable article identity -------------
+
+
+@pytest.mark.anyio
+async def test_toggle_auto_delivery_flips_one_user_atomically() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=6000)
+        other = await _add_user(session, telegram_user_id=6001)
+
+        assert await toggle_auto_delivery(session, user.id) is False
+        assert await toggle_auto_delivery(session, user.id) is True
+
+        await session.refresh(other)
+        assert other.auto_delivery_enabled is True
+        assert await toggle_auto_delivery(session, uuid.uuid4()) is None
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_mark_unavailable_then_available_by_telegram_id() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=6002)
+        at = datetime.now(UTC)
+
+        assert await mark_delivery_unavailable(session, user.id, at) is True
+        await session.refresh(user)
+        assert user.delivery_unavailable_at is not None
+
+        assert await mark_recipient_available(session, user.telegram_user_id) is True
+        await session.refresh(user)
+        assert user.delivery_unavailable_at is None
+
+        # An unknown Telegram id is a no-op, not a new user.
+        assert await mark_recipient_available(session, 999_999_999) is False
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_agent_lease_round_trip_is_scoped_to_the_user() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=6003)
+        until = datetime.now(UTC) + timedelta(seconds=120)
+
+        assert await acquire_agent_lease(session, user.id, until) is True
+        await session.refresh(user)
+        assert user.agent_processing_until is not None
+
+        assert await release_agent_lease(session, user.id) is True
+        await session.refresh(user)
+        assert user.agent_processing_until is None
+
+        assert await acquire_agent_lease(session, uuid.uuid4(), until) is False
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_create_news_item_stores_the_publisher_external_id() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=6004)
+        feed = await _add_feed(session, user)
+
+        item = await create_news_item(
+            session,
+            user_id=user.id,
+            feed_id=feed.id,
+            url="https://example.com/article/1",
+            title="Article",
+            external_id="publisher-guid-1",
+        )
+
+        assert item is not None
+        assert item.external_id == "publisher-guid-1"
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_external_id_is_unique_per_user() -> None:
+    session = await _create_session()
+    try:
+        user = await _add_user(session, telegram_user_id=6005)
+        feed = await _add_feed(session, user)
+
+        await create_news_item(
+            session,
+            user_id=user.id,
+            feed_id=feed.id,
+            url="https://example.com/article/1",
+            title="First",
+            external_id="publisher-guid-1",
+        )
+
+        with pytest.raises(IntegrityError):
+            await create_news_item(
+                session,
+                user_id=user.id,
+                feed_id=feed.id,
+                url="https://mirror.example.com/article/1",
+                title="Duplicate",
+                external_id="publisher-guid-1",
+            )
+        await session.rollback()
+    finally:
+        await _close_session(session)
+
+
+@pytest.mark.anyio
+async def test_external_id_can_repeat_for_different_users() -> None:
+    session = await _create_session()
+    try:
+        first = await _add_user(session, telegram_user_id=6006)
+        second = await _add_user(session, telegram_user_id=6007)
+        first_feed = await _add_feed(session, first, url="https://a.example.com/feed")
+        second_feed = await _add_feed(session, second, url="https://b.example.com/feed")
+
+        for user, feed in ((first, first_feed), (second, second_feed)):
+            item = await create_news_item(
+                session,
+                user_id=user.id,
+                feed_id=feed.id,
+                url="https://example.com/article/1",
+                title="Shared",
+                external_id="publisher-guid-1",
+            )
+            assert item is not None
     finally:
         await _close_session(session)

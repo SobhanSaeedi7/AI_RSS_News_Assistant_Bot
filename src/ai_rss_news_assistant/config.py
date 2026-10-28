@@ -91,6 +91,15 @@ class Settings(BaseSettings):
         description="Timeout in seconds for a single LLM request",
     )
 
+    # --- Outbound fetching ---
+    fetch_timeout_seconds: int = Field(
+        DEFAULT_FETCH_TIMEOUT_SECONDS,
+        description=(
+            "Timeout in seconds for fetching a feed (bot add-time probe and "
+            "worker polling) or an article's full text"
+        ),
+    )
+
     @field_validator("bot_token", "agent_internal_token", mode="before")
     @classmethod
     def _normalize_optional_secret(cls, value: object) -> object:
@@ -108,6 +117,11 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_llm_timeout(cls, value: int) -> int:
         return _positive(value, "llm_timeout_seconds")
+
+    @field_validator("fetch_timeout_seconds")
+    @classmethod
+    def _validate_fetch_timeout(cls, value: int) -> int:
+        return _positive(value, "fetch_timeout_seconds")
 
     @field_validator("app_env")
     @classmethod
@@ -183,20 +197,11 @@ class WorkerSettings(Settings):
         True,
         description="Fetch and store full article text for items that only have a summary",
     )
-    fetch_timeout_seconds: int = Field(
-        DEFAULT_FETCH_TIMEOUT_SECONDS,
-        description="Timeout in seconds for fetching an article's full text",
-    )
 
     @field_validator("poll_interval_seconds")
     @classmethod
     def _validate_poll_interval(cls, value: int) -> int:
         return _positive(value, "poll_interval_seconds")
-
-    @field_validator("fetch_timeout_seconds")
-    @classmethod
-    def _validate_fetch_timeout(cls, value: int) -> int:
-        return _positive(value, "fetch_timeout_seconds")
 
 
 class AgentSettings(Settings):
