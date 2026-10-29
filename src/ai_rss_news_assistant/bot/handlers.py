@@ -501,17 +501,19 @@ async def delivery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /schedule [interval]: show or change the delivery cadence.
+    """Handle /schedule [minutes]: show or change the delivery cadence.
 
-    The interval is a minimum spacing between two automatic deliveries. It is
-    independent of ``/delivery`` (the ON/OFF switch), which stops automatic
-    delivery entirely, and it never affects ``/news`` or ``/ask``.
+    The single argument is a non-negative integer number of minutes; ``0``
+    keeps the original "no extra throttle" behavior. The interval is a minimum
+    spacing between two automatic deliveries, evaluated on the worker's poll
+    cycle. It is independent of ``/delivery`` (the ON/OFF switch), which stops
+    automatic delivery entirely, and it never affects ``/news`` or ``/ask``.
     """
     telegram_user = update.effective_user
     if telegram_user is None or update.effective_message is None:
         return
 
-    args = [argument.strip().lower() for argument in (context.args or [])]
+    args = [argument.strip() for argument in (context.args or [])]
 
     if len(args) > 1:
         await update.effective_message.reply_text(SCHEDULE_USAGE)
@@ -519,20 +521,22 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     db: Database = context.application.bot_data["db"]
 
-    if args:
-        requested = parse_interval(args[0])
-        if requested is None:
-            await update.effective_message.reply_text(SCHEDULE_USAGE)
-            return
-        await use_cases.set_delivery_interval(db, telegram_user.id, requested)
+    if not args:
+        # No argument is not a value to save: show the current interval together
+        # with the numeric usage instead of changing anything.
+        current = await use_cases.delivery_interval(db, telegram_user.id)
         await update.effective_message.reply_text(
-            SCHEDULE_UPDATED.format(interval=format_interval(requested))
+            SCHEDULE_STATUS.format(interval=format_interval(current))
         )
         return
 
-    current = await use_cases.delivery_interval(db, telegram_user.id)
+    requested = parse_interval(args[0])
+    if requested is None:
+        await update.effective_message.reply_text(SCHEDULE_USAGE)
+        return
+    await use_cases.set_delivery_interval(db, telegram_user.id, requested)
     await update.effective_message.reply_text(
-        SCHEDULE_STATUS.format(interval=format_interval(current))
+        SCHEDULE_UPDATED.format(interval=format_interval(requested))
     )
 
 

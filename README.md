@@ -2,126 +2,138 @@
 
 **Your personal AI-powered news assistant on Telegram.**
 
-Manage RSS feeds, receive scheduled news summaries, and ask questions about your collected news — all in one place.
-
-<p align="center">
-
-🤖 Telegram Bot · 🧠 AI-Powered · 🐳 Docker Compose · 🔒 User Isolation
-
-</p>
+Manage RSS feeds, receive news summaries, control delivery schedules, and ask questions about your stored news — all in one place.
 
 ## ✨ Features
 
-- **📡 RSS Management** — Add, list, and remove RSS/Atom feeds with URL validation.
-- **📝 AI News Summaries** — Receive concise, automatically generated summaries of new articles.
-- **⏰ Personalized Delivery** — Toggle automatic delivery and configure your own schedule.
-- **💬 Ask Your News** — Ask questions in natural language and get answers grounded in your stored articles.
-- **🔗 Relevant Sources** — Answers include only the sources actually cited.
-- **♻️ Duplicate Prevention** — Prevent repeated articles from being stored or normally delivered to the same user.
-- **🛡️ Per-User Isolation** — Each user's feeds, articles, and deliveries remain scoped to their account.
-- **🔄 Resilient Processing** — Feed retry backoff, Telegram error handling, and coordination between question answering and automatic delivery.
-- **🐳 One-Command Deployment** — Docker Compose builds and runs the services and applies database migrations automatically.
+- 📡 Add, list, and delete RSS/Atom feeds
+- 🤖 AI-generated summaries with an extractive fallback
+- 🔔 Personalized automatic news delivery
+- ⏱️ Per-user delivery schedules
+- 💬 Ask questions about stored news
+- 🔗 Answers with verified article sources
+- 🛡️ Per-user data isolation and RSS URL validation
+- 🔄 Duplicate prevention and failure handling
+- 🐳 Docker Compose deployment
+
+## 🏗️ Architecture
+
+| Service | Responsibility |
+|---|---|
+| **Bot** | Handles Telegram commands and user requests |
+| **Worker** | Fetches RSS feeds, stores articles, summarizes, and delivers news |
+| **Agent** | Retrieves a user's stored news and answers questions |
+| **PostgreSQL** | Stores users, feeds, articles, preferences, and conversations |
+| **Migration Job** | Applies database migrations at startup |
+
+Services communicate through internal HTTP and PostgreSQL. No message broker or vector database is required.
 
 ## 🚀 Quick Start
 
-### 1. Prerequisites
+### Requirements
 
-Install [Docker](https://docs.docker.com/get-docker/) with Docker Compose support and create a Telegram bot through [@BotFather](https://t.me/BotFather).
+- Docker Engine and Docker Compose
+- A Telegram bot token from [@BotFather](https://t.me/BotFather)
+- An LLM API key for AI-generated answers and summaries
 
-### 2. Configure the environment
+### 1. Configure environment variables
 
-Copy the example environment file:
-
-```bash
-cp .env.example .env
-```
-
-On Windows PowerShell, use:
+**Windows PowerShell:**
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Edit `.env` and configure at least:
+**Linux/macOS:**
+
+```bash
+cp .env.example .env
+```
+
+Configure these values in `.env`:
 
 | Variable | Purpose |
 |---|---|
-| `BOT_TOKEN` | Telegram bot token from BotFather |
-| `POSTGRES_PASSWORD` | PostgreSQL password |
-| `AGENT_INTERNAL_TOKEN` | Shared secret for internal bot-to-agent authentication |
-| `LLM_API_KEY` | Optional API key for AI-generated summaries and answers |
+| `BOT_TOKEN` | Telegram bot token |
+| `POSTGRES_PASSWORD` | Database password |
+| `AGENT_INTERNAL_TOKEN` | Shared Bot–Agent authentication token |
+| `LLM_API_KEY` | Optional LLM provider key |
 
-Use the same strong, random `AGENT_INTERNAL_TOKEN` for the bot and agent. See `.env.example` for the available settings and defaults. Never commit `.env` or share your secrets.
+Use the same strong random `AGENT_INTERNAL_TOKEN` for the Bot and Agent. Never commit `.env` or expose its secrets.
 
-### 3. Run the entire project
+### 2. Start the application
 
 ```bash
 docker compose up --build -d
 ```
 
-**That's it!** Docker Compose builds the application image, starts PostgreSQL, applies pending database migrations, and starts the Bot, Worker, and Agent services.
+### 3. Check the services
 
+```bash
+docker compose ps
+docker compose logs -f
+```
 
 ## 🤖 Telegram Commands
 
 | Command | Description |
 |---|---|
-| `/start` | Register and display the welcome message |
-| `/help` | Show available commands and usage |
+| `/start` | Start the bot |
+| `/help` | Show available commands |
 | `/addfeed [url]` | Add an RSS/Atom feed |
-| `/listfeeds` | List your feeds and their health status |
-| `/delfeed [id\|url]` | Remove one of your feeds |
-| `/news` | Browse your latest stored articles |
-| `/delivery` | Toggle automatic news delivery ON/OFF |
-| `/schedule` | Show your delivery schedule |
-| `/schedule <interval>` | Change your delivery interval |
-| `/ask <question>` | Ask a question about your stored news |
-| `/cancel` | Cancel a pending feed operation |
+| `/listfeeds` | List your feeds |
+| `/delfeed [id\|url]` | Delete one of your feeds |
+| `/news` | View stored news |
+| `/delivery` | Toggle automatic delivery |
+| `/schedule` | Show your current schedule |
+| `/schedule <minutes>` | Set delivery interval |
+| `/ask <question>` | Ask about your stored news |
+| `/cancel` | Cancel an active input prompt |
 
-**Feed management:** `/addfeed` and `/delfeed` accept an inline argument or prompt for it in a second step. Pending prompts expire after five minutes and can be cancelled with `/cancel`.
+## ⏱️ Delivery Schedule
 
-**Schedule options:** `0`, `15m`, `30m`, `1h`, `3h`, `6h`, `12h`, `24h`. The default `0` means delivery as soon as new articles are available on the next poll. The shortest interval is subject to the worker's polling frequency.
+Set your delivery interval in minutes:
 
-## 🏗️ Architecture
+```text
+/schedule 30
+/schedule 60
+/schedule 0
+```
 
-The application uses separate services with clearly defined responsibilities:
+- Accepts one non-negative integer: `0` to `35,791,394`.
+- `0` means no additional per-user delivery delay.
+- The default Worker polling interval is **5 minutes**.
+- Delivery schedules are checked during Worker polls, not by independent timers.
+- `/delivery` controls automatic delivery separately; `/news` and `/ask` remain available when automatic delivery is disabled.
 
-| Service | Responsibility |
-|---|---|
-| **Bot** | Telegram commands and user interactions |
-| **Worker** | RSS polling, article processing, summaries, and scheduled delivery |
-| **Agent** | Retrieval and AI-powered question answering |
-| **PostgreSQL** | Persistent application data |
-| **Migration Job** | Applies database schema migrations before application startup |
+## 📰 RSS Ingestion
 
-The Bot communicates with the Agent over authenticated internal HTTP. All application services share the database, while the Agent is not exposed through a public host port.
+When a feed is first processed, the Worker imports **all entries in the feed's current response**. There is no application-level initial-import limit.
 
-### Technology Stack
+- Large feed archives can create a delivery backlog.
+- Up to **5 pending articles per user** are processed in each delivery run.
+- Duplicate articles are prevented per user using normalized URLs and, when available, external IDs.
+- Feed failures use retry backoff and do not automatically stop processing other feeds.
 
-- **Python 3.12**
-- **Telegram Bot API**
-- **PostgreSQL**
-- **SQLAlchemy & Alembic**
-- **FastAPI & HTTPX**
-- **OpenAI-compatible LLM API**
-- **Docker & Docker Compose**
-- **pytest & Ruff**
+## 💬 AI News Assistant
 
-## 🔐 Security & Reliability
+Use `/ask` to ask questions about news stored from your feeds.
 
-- Database-level ownership checks help prevent access to other users' data.
-- RSS URLs are validated, and private or reserved network destinations are rejected.
-- Internal Agent requests require bearer-token authentication.
-- RSS content is treated as untrusted input; the Agent has no web-search tools.
-- Blocked Telegram recipients are paused until they contact the bot again.
-- Failed sends are isolated so one recipient does not stop other users' deliveries.
-- Automatic delivery preferences and schedules persist across restarts.
+- The Agent retrieves news belonging to the requesting user.
+- Answers are based on stored articles, with source titles and links where available.
+- The Agent has no web-search or browser tools and does not fetch live news.
+- If relevant stored evidence is unavailable, it returns an insufficient-evidence response.
+- Retrieval uses keyword matching, not semantic search; some relevant articles may be missed.
 
+Without `LLM_API_KEY`, AI answers are unavailable, but the Worker can use extractive summaries.
 
-## ⚙️ Design Decisions
+## 🔐 Security
 
-- **PostgreSQL:** Shared persistent storage for independent services and concurrent database access.
-- **Internal HTTP:** Keeps Telegram handling separate from retrieval and provider calls.
-- **Keyword-based retrieval:** Avoids the additional cost and infrastructure of embeddings and a vector database.
-- **Polling:** Collects RSS updates without requiring a publicly accessible webhook endpoint.
-- **Optional LLM:** Without an API key, automatic delivery falls back to trimmed article text; AI-powered `/ask` answers are unavailable.
+- Database queries and constraints enforce per-user data isolation.
+- The Agent requires an internal Bearer token for answer requests.
+- RSS URLs and redirect destinations are validated against unsafe network targets.
+- Article content is treated as untrusted input, with prompt instructions and structural safeguards against prompt injection.
+- Source citations are checked against retrieved records.
+
+**Important:** Prompt-injection defenses reduce risk but cannot guarantee that an LLM will never be influenced by malicious content. PostgreSQL Row-Level Security is not configured, and DNS rebinding remains a known URL-validation risk.
+
