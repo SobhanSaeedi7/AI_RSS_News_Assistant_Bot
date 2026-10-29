@@ -73,14 +73,16 @@ docker compose up --build -d
 | `/delfeed [id\|url]` | Remove one of your feeds |
 | `/news` | Browse your latest stored articles |
 | `/delivery` | Toggle automatic news delivery ON/OFF |
-| `/schedule` | Show your delivery schedule |
-| `/schedule <interval>` | Change your delivery interval |
+| `/schedule` | Show your delivery schedule and usage |
+| `/schedule <minutes>` | Set your delivery interval in minutes |
 | `/ask <question>` | Ask a question about your stored news |
 | `/cancel` | Cancel a pending feed operation |
 
 **Feed management:** `/addfeed` and `/delfeed` accept an inline argument or prompt for it in a second step. Pending prompts expire after five minutes and can be cancelled with `/cancel`.
 
-**Schedule options:** `0`, `15m`, `30m`, `1h`, `3h`, `6h`, `12h`, `24h`. The default `0` means delivery as soon as new articles are available on the next poll. The shortest interval is subject to the worker's polling frequency.
+**Schedule interval:** `/schedule` takes exactly one non-negative integer number of minutes, for example `/schedule 30` or `/schedule 60`. The accepted range is `0` to `35,791,394` minutes (the largest whole number of minutes that fits in the database's 32-bit seconds column). The default `0` means no extra throttling: new articles are eligible on every worker poll. A positive value is the minimum spacing between automatic deliveries for that user and does not change the global RSS polling interval.
+
+Delivery is evaluated during the worker's polling loop (default every 5 minutes), not by a separate per-user timer. Actual delivery therefore happens on the first poll at or after the requested interval; an interval below 5 minutes cannot guarantee delivery every minute. `/schedule` without an argument shows the current interval and usage.
 
 ## 🏗️ Architecture
 

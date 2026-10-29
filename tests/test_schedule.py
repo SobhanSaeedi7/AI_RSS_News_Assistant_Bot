@@ -24,9 +24,9 @@ from sqlalchemy.pool import StaticPool
 from ai_rss_news_assistant.bot import use_cases
 from ai_rss_news_assistant.bot.schedule import (
     DEFAULT_DELIVERY_INTERVAL_SECONDS,
-    DELIVERY_INTERVALS,
+    MAX_INTERVAL_MINUTES,
+    SECONDS_PER_MINUTE,
     format_interval,
-    interval_options,
     parse_interval,
 )
 from ai_rss_news_assistant.db.base import Base
@@ -62,56 +62,60 @@ async def _make_database() -> tuple[object, _TestDatabase]:
     return engine, _TestDatabase(factory)
 
 
-# --- interval catalog -------------------------------------------------------
+# --- numeric interval parser ------------------------------------------------
 
 
 def test_default_interval_preserves_the_previous_behaviour() -> None:
     """Before scheduling existed every poll could deliver, so the default is 0."""
     assert DEFAULT_DELIVERY_INTERVAL_SECONDS == 0
-    assert DELIVERY_INTERVALS[0] == 0
 
 
-def test_all_supported_tokens_parse_to_their_seconds() -> None:
-    expected = {
-        "0": 0,
-        "15m": 900,
-        "30m": 1800,
-        "1h": 3600,
-        "3h": 10800,
-        "6h": 21600,
-        "12h": 43200,
-        "24h": 86400,
-    }
-    for token, seconds in expected.items():
-        assert parse_interval(token) == seconds
+@pytest.mark.parametrize(
+    ("raw", "seconds"),
+    [
+        ("0", 0),
+        ("30", 1800),
+        ("60", 3600),
+        ("030", 1800),
+        (" 45 ", 2700),
+        ("۲۵", 1500),  # Persian digits are accepted by ``int``.
+    ],
+)
+def test_integer_minutes_parse_to_seconds(raw: str, seconds: int) -> None:
+    assert parse_interval(raw) == seconds
 
 
-def test_parsing_is_case_and_whitespace_insensitive() -> None:
-    assert parse_interval(" 6H ") == 21600
-    assert parse_interval("فوری") == 0
-
-
-@pytest.mark.parametrize("raw", ["5m", "90m", "1d", "", "  ", "3600", "weekly"])
-def test_unsupported_values_are_rejected(raw: str) -> None:
-    """Only the documented presets are accepted, not arbitrary durations."""
+@pytest.mark.parametrize(
+    "raw",
+    ["", "  ", "5m", "1h", "1d", "1.5", "-1", "+5", "abc", "30 60", "weekly"],
+)
+def test_invalid_values_are_rejected(raw: str) -> None:
+    """Suffixes, signs, decimals, and non-numeric input are never truncated."""
     assert parse_interval(raw) is None
 
 
-def test_every_supported_interval_has_a_label() -> None:
-    for seconds in DELIVERY_INTERVALS:
-        assert format_interval(seconds)
-    assert format_interval(0) != format_interval(3600)
+def test_maximum_interval_fits_the_database_column() -> None:
+    """The upper bound is the PostgreSQL int4 limit of the seconds column."""
+    assert MAX_INTERVAL_MINUTES * SECONDS_PER_MINUTE <= 2**31 - 1
+    assert (MAX_INTERVAL_MINUTES + 1) * SECONDS_PER_MINUTE > 2**31 - 1
+
+    assert parse_interval(str(MAX_INTERVAL_MINUTES)) == (
+        MAX_INTERVAL_MINUTES * SECONDS_PER_MINUTE
+    )
+    assert parse_interval(str(MAX_INTERVAL_MINUTES + 1)) is None
+
+
+def test_minutes_are_rendered_as_minutes() -> None:
+    assert format_interval(0) != format_interval(1800)
+    assert "0" in format_interval(0)
+    assert "بدون محدودیت" in format_interval(0)
+    assert format_interval(1800) == "هر 30 دقیقه"
+    assert format_interval(3600) == "هر 60 دقیقه"
 
 
 def test_unknown_stored_interval_does_not_crash_rendering() -> None:
     """A hand-edited row must not break /schedule."""
     assert format_interval(42) == "هر 42 ثانیه"
-
-
-def test_options_line_lists_every_token() -> None:
-    options = interval_options()
-    for token in ("0", "15m", "1h", "6h", "24h"):
-        assert token in options
 
 
 # --- due-time rule ----------------------------------------------------------
@@ -206,12 +210,11 @@ async def test_changing_the_interval_keeps_the_delivery_switch_untouched() -> No
         await engine.dispose()
 
 
-def test_the_help_text_lists_every_accepted_interval() -> None:
-    """/help must be self-sufficient: no guessing the schedule tokens."""
+def test_the_help_text_documents_the_numeric_syntax() -> None:
+    """/help must be self-sufficient: the numeric usage and example are visible."""
     from ai_rss_news_assistant.bot.messages import HELP_MESSAGE
-    from ai_rss_news_assistant.bot.schedule import INTERVAL_TOKENS
-
-    for token in INTERVAL_TOKENS:
-        assert token in HELP_MESSAGE
 
     assert "/schedule" in HELP_MESSAGE
+    assert "/schedule 30" in HELP_MESSAGE
+    assert "دقیقه" in HELP_MESSAGE
+    assert "poll" in HELP_MESSAGE

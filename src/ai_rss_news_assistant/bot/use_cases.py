@@ -313,9 +313,10 @@ async def set_delivery_interval(
 ) -> int:
     """Store the user's delivery interval and return it.
 
-    Only values from :data:`ai_rss_news_assistant.bot.schedule.DELIVERY_INTERVALS`
-    reach this function, because the handler parses the argument first; the
-    repository still rejects a negative value defensively.
+    Only values accepted by
+    :func:`ai_rss_news_assistant.bot.schedule.parse_interval` reach this
+    function, because the handler parses the argument first; the repository
+    still rejects a negative value defensively.
     """
     async with db.session() as session:
         user = await get_user_by_telegram_id(session, telegram_user_id)

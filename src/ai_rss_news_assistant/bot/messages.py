@@ -6,8 +6,8 @@ Telegram, and nothing here interpolates an exception or credential: internal
 failures are reported with a fixed Persian message, never with implementation
 detail.
 
-The schedule text is derived from :func:`bot.schedule.interval_options`, so the
-commands a user reads in ``/start`` and ``/help`` can never drift from the
+The schedule text is derived from :data:`bot.schedule.MAX_INTERVAL_MINUTES`, so
+the range a user reads in ``/start`` and ``/help`` can never drift from the
 values the parser actually accepts.
 
 Messages that describe an answer outcome (insufficient evidence, agent
@@ -18,11 +18,11 @@ drift apart.
 
 from __future__ import annotations
 
-from ai_rss_news_assistant.bot.schedule import interval_options
+from ai_rss_news_assistant.bot.schedule import MAX_INTERVAL_MINUTES
 from ai_rss_news_assistant.contracts import MAX_QUESTION_CHARS
 
-# The one authoritative list of accepted cadences, reused by every message.
-SCHEDULE_OPTIONS = interval_options()
+# The one authoritative range, reused by every schedule message.
+SCHEDULE_RANGE = f"0 تا {MAX_INTERVAL_MINUTES:,} دقیقه"
 
 DELIVERY_COMMAND_HINT = (
     "/delivery - روشن/خاموش کردن ارسال خودکار (بدون آرگومان؛ هر بار تغییر می‌کند)"
@@ -37,7 +37,7 @@ _COMMAND_LIST = (
     "/delfeed [id|url] - حذف فید (بدون شناسه، ربات می‌پرسد)\n"
     "/news - نمایش آخرین اخبار ذخیره‌شده\n"
     f"{DELIVERY_COMMAND_HINT}\n"
-    f"/schedule <بازه> - تنظیم فاصله ارسال خودکار خبر ({SCHEDULE_OPTIONS})\n"
+    "/schedule <دقیقه> - تنظیم فاصله ارسال خودکار خبر (مثال: /schedule 30؛ 0 = بدون محدودیت)\n"
     f"{CANCEL_COMMAND_HINT}\n"
     "/ask <سؤال> - پرسیدن سؤال از خبرهای ذخیره‌شده شما"
 )
@@ -49,7 +49,8 @@ WELCOME_MESSAGE = (
 # Kept as a separate constant so /help can explain the two settings without
 # repeating the command list.
 SCHEDULE_COMMAND_HINT = (
-    f"/schedule <بازه> - تنظیم فاصله ارسال خودکار خبر ({SCHEDULE_OPTIONS})"
+    "/schedule <دقیقه> - تنظیم فاصله ارسال خودکار خبر "
+    "(مثال: /schedule 30؛ 0 = بدون محدودیت)"
 )
 
 HELP_MESSAGE = (
@@ -58,7 +59,9 @@ HELP_MESSAGE = (
     f"{_COMMAND_LIST}\n\n"
     "نکته‌ها:\n"
     "• بازه schedule فقط روی ارسال خودکار اثر دارد؛ /news و /ask همیشه در دسترس‌اند.\n"
-    "• مقدار 0 در /schedule یعنی بدون محدودیت (فوری).\n"
+    "• /schedule یک عدد صحیح دقیقه می‌پذیرد؛ مثال: /schedule 30 یعنی حداقل ۳۰ دقیقه بین دو ارسال.\n"
+    "• مقدار 0 در /schedule یعنی بدون محدودیت (در هر poll).\n"
+    "• ارسال واقعی در چرخه poll ورکر انجام می‌شود؛ بازه کمتر از ۵ دقیقه ارسال هر دقیقه را تضمین نمی‌کند.\n"
     "• /delivery بدون آرگومان وضعیت ارسال خودکار را جابه‌جا می‌کند؛ آرگومان اضافه نمی‌پذیرد.\n"
     "• /addfeed و /delfeed را می‌توانید بدون آرگومان بفرستید؛ ربات مقدار لازم را در پیام بعدی می‌پرسد.\n"
     "• درخواست نیمه‌تمام پس از ۵ دقیقه منقضی می‌شود و با /cancel هم لغو می‌شود."
@@ -169,18 +172,20 @@ DELIVERY_STATUS_ON = "وضعیت ارسال خودکار: روشن ✅"
 DELIVERY_STATUS_OFF = "وضعیت ارسال خودکار: خاموش ⛔"
 
 SCHEDULE_USAGE = (
-    "بازه ارسال خودکار را با یکی از این مقادیر تنظیم کنید:\n"
-    "/schedule <بازه>\n\n"
-    f"بازه‌های مجاز: {SCHEDULE_OPTIONS}\n"
-    "مقدار 0 یعنی بدون محدودیت (فوری).\n\n"
-    "مثال: /schedule 6h"
+    "بازه ارسال خودکار را با یک عدد صحیح «دقیقه» تنظیم کنید:\n"
+    "/schedule <دقیقه>\n\n"
+    f"بازه مجاز: {SCHEDULE_RANGE}\n"
+    "مقدار 0 یعنی بدون محدودیت (در هر poll).\n"
+    "مثال: /schedule 30\n\n"
+    "ارسال واقعی در چرخه poll ورکر انجام می‌شود؛ بازه کمتر از فاصله poll "
+    "تضمین ارسال سریع‌تر نمی‌دهد."
 )
 
 SCHEDULE_STATUS = (
     "بازه فعلی ارسال خودکار: {interval}\n\n"
-    "برای تغییر بازه: /schedule <بازه>\n"
-    f"بازه‌های مجاز: {SCHEDULE_OPTIONS}\n"
-    "مثال: /schedule 6h\n\n"
+    "برای تغییر بازه: /schedule <دقیقه> (عدد صحیح؛ مثال: /schedule 30)\n"
+    f"بازه مجاز: {SCHEDULE_RANGE}\n"
+    "مقدار 0 یعنی بدون محدودیت (در هر poll).\n\n"
     "این بازه فقط روی ارسال خودکار اثر دارد؛ /news و /ask همیشه در دسترس‌اند.\n"
     "با /delivery (بدون آرگومان) می‌توانید ارسال خودکار را کاملاً خاموش کنید."
 )
@@ -188,6 +193,8 @@ SCHEDULE_STATUS = (
 SCHEDULE_UPDATED = (
     "بازه ارسال خودکار به «{interval}» تغییر کرد.\n"
     "این تنظیم ذخیره شد و پس از restart هم باقی می‌ماند.\n\n"
+    "یادآوری: ارسال واقعی در چرخه poll ورکر انجام می‌شود؛ بازه کمتر از فاصله "
+    "poll تضمین ارسال سریع‌تر نمی‌دهد.\n"
     "یادآوری: /delivery بدون آرگومان ارسال خودکار را روشن/خاموش می‌کند."
 )
 

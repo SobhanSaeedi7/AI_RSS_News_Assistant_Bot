@@ -1,88 +1,68 @@
-"""Supported automatic-delivery intervals and their user-facing labels.
+"""Numeric automatic-delivery intervals for ``/schedule``.
 
-The set is deliberately small and fixed. A user picks a cadence, not a
-free-form number of seconds, so the command can validate input completely and
-every choice is a value the worker can honour. ``0`` means "no throttle": the
-user receives new items on the next poll, which is how delivery worked before
-per-user scheduling existed.
+A user sets one non-negative integer number of minutes. ``0`` means "no
+throttle": delivery is eligible on every worker poll, which is how delivery
+worked before per-user scheduling existed. A positive value is the *minimum*
+spacing between two automatic deliveries for that user.
+
+Timing granularity: the worker runs every ``POLL_INTERVAL_SECONDS`` (default
+300 s), so an interval is a minimum, not a timer. A 30-minute schedule set at
+12:07 is first eligible at 12:37 and is actually delivered at the first poll at
+or after that moment - 12:40 with the default settings. An interval below the
+poll interval cannot guarantee delivery that often.
+
+The upper bound is the PostgreSQL ``INTEGER`` (signed 32-bit) limit of the
+``users.delivery_interval_seconds`` column. ``MAX_INTERVAL_MINUTES * 60`` fits
+in that column, so every accepted value can be persisted without overflow.
 
 This module is pure (no I/O, no database, no Telegram) so the parser and the
 labels can be unit tested directly.
-
-Timing granularity: the worker runs every ``POLL_INTERVAL_SECONDS`` (default
-300 s), so an interval is a *minimum* spacing. A "15m" schedule set at 12:07 is
-first eligible at 12:22 and is actually delivered at the first poll at or after
-that moment - 12:25 with the default settings.
 """
 
 from __future__ import annotations
 
 DEFAULT_DELIVERY_INTERVAL_SECONDS = 0
+SECONDS_PER_MINUTE = 60
 
-# Every value a user may choose, in seconds.
-DELIVERY_INTERVALS: tuple[int, ...] = (
-    0,  # immediately, once per poll (default)
-    900,  # 15m
-    1800,  # 30m
-    3600,  # 1h
-    10800,  # 3h
-    21600,  # 6h
-    43200,  # 12h
-    86400,  # 24h
-)
-
-# Canonical command tokens, in the order they are shown to the user.
-INTERVAL_TOKENS: tuple[str, ...] = (
-    "0",
-    "15m",
-    "30m",
-    "1h",
-    "3h",
-    "6h",
-    "12h",
-    "24h",
-)
-
-_TOKEN_TO_SECONDS: dict[str, int] = dict(
-    zip(INTERVAL_TOKENS, DELIVERY_INTERVALS, strict=True)
-)
-
-# Friendly aliases. "فوری" is offered because the bot speaks Persian, and
-# "immediate" is the English spelling documented in the README. There is no
-# "off" alias: delivery is switched off with /delivery, and overloading the
-# interval parser with the same word made the two settings ambiguous.
-_ALIASES: dict[str, int] = {
-    **_TOKEN_TO_SECONDS,
-    "immediate": 0,
-    "فوری": 0,
-}
-
-_LABELS: dict[int, str] = {
-    0: "فوری (در هر poll)",
-    900: "هر 15 دقیقه",
-    1800: "هر 30 دقیقه",
-    3600: "هر 1 ساعت",
-    10800: "هر 3 ساعت",
-    21600: "هر 6 ساعت",
-    43200: "هر 12 ساعت",
-    86400: "هر 24 ساعت",
-}
+# ``delivery_interval_seconds`` is a SQLAlchemy Integer (PostgreSQL int4).
+# Anything larger would overflow when stored, so the accepted minutes range is
+# bounded by the largest whole number of minutes that fits in int4.
+MAX_INTERVAL_MINUTES = (2**31 - 1) // SECONDS_PER_MINUTE
 
 
 def parse_interval(raw: str) -> int | None:
-    """Return the interval in seconds, or ``None`` if it is not allowed."""
-    return _ALIASES.get(raw.strip().lower())
+    """Return the interval in seconds, or ``None`` if the input is invalid.
+
+    Exactly one non-negative base-10 integer is accepted. Suffixes (``m``,
+    ``h``, ``d``), signs, decimals, and embedded whitespace are rejected rather
+    than truncated or rounded. Persian/Arabic-Indic digits are accepted because
+    ``int`` understands them and the bot speaks Persian.
+    """
+    value = raw.strip()
+    if not value or not value.isdigit():
+        return None
+
+    try:
+        minutes = int(value)
+    except ValueError:
+        # ``str.isdigit`` accepts a few characters (for example superscripts)
+        # that ``int`` cannot parse; treat those as invalid input.
+        return None
+
+    if minutes > MAX_INTERVAL_MINUTES:
+        return None
+    return minutes * SECONDS_PER_MINUTE
 
 
 def format_interval(seconds: int) -> str:
-    """Return the Persian label for an interval.
+    """Return a Persian label for an interval stored in seconds.
 
-    An unknown stored value (possible only if the database was edited by hand)
-    is rendered as the number of seconds rather than crashing a handler.
+    Values produced by :func:`parse_interval` are always whole minutes. An
+    unknown stored value (possible only if the database was edited by hand) is
+    rendered as seconds rather than crashing a handler.
     """
-    return _LABELS.get(seconds, f"هر {seconds} ثانیه")
-
-
-def interval_options() -> str:
-    """Return the allowed tokens as one comma-separated line."""
-    return ", ".join(INTERVAL_TOKENS)
+    if seconds == 0:
+        return "0 دقیقه (بدون محدودیت؛ در هر poll)"
+    if seconds % SECONDS_PER_MINUTE == 0:
+        return f"هر {seconds // SECONDS_PER_MINUTE:,} دقیقه"
+    return f"هر {seconds} ثانیه"

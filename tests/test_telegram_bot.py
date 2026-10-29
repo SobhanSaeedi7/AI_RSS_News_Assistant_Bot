@@ -51,6 +51,7 @@ from ai_rss_news_assistant.bot.messages import (
     NEWS_MAX_MESSAGE_LENGTH,
     PENDING_EXPIRED,
 )
+from ai_rss_news_assistant.bot.schedule import MAX_INTERVAL_MINUTES
 from ai_rss_news_assistant.contracts import AGENT_ERROR, AgentAnswer, AgentSource
 from ai_rss_news_assistant.db.base import Base, Database
 from ai_rss_news_assistant.db.models import User, UserFeed
@@ -1486,93 +1487,71 @@ def _grounded_answer(
 
 
 @pytest.mark.anyio
-async def test_schedule_command_shows_the_default_interval() -> None:
-    """A new user is shown the default cadence, not an error."""
+async def test_schedule_command_without_arguments_shows_usage_and_interval() -> None:
+    """A missing argument is rejected: nothing is written, usage is shown."""
     update = _make_update()
     context = _make_context(AsyncMock())
     _mock_db_session(context.application.bot_data["db"])
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.delivery_interval",
-        return_value=0,
+    with (
+        patch(
+            "ai_rss_news_assistant.bot.use_cases.delivery_interval",
+            return_value=0,
+        ),
+        patch("ai_rss_news_assistant.bot.use_cases.set_delivery_interval") as mock_set,
     ):
         await schedule_command(update, context)
 
+    mock_set.assert_not_called()
     text = update.effective_message.reply_text.call_args[0][0]
-    assert "فوری" in text
-    assert "/schedule" in text
+    assert "0 دقیقه" in text
+    assert "/schedule 30" in text
+    assert "دقیقه" in text
 
 
 @pytest.mark.anyio
-async def test_schedule_command_sets_an_interval() -> None:
-    """`/schedule 6h` stores 21600 seconds for the calling user."""
+async def test_schedule_command_sets_30_minutes() -> None:
+    """`/schedule 30` stores 1800 seconds for the calling user."""
     update = _make_update()
-    context = _make_context(AsyncMock(), args=["6h"])
+    context = _make_context(AsyncMock(), args=["30"])
     db = context.application.bot_data["db"]
     _mock_db_session(db)
 
     with patch(
         "ai_rss_news_assistant.bot.use_cases.set_delivery_interval",
         new_callable=AsyncMock,
-        return_value=21600,
+        return_value=1800,
     ) as mock_set:
         await schedule_command(update, context)
 
-    mock_set.assert_awaited_once_with(db, _make_update().effective_user.id, 21600)
+    mock_set.assert_awaited_once_with(db, _make_update().effective_user.id, 1800)
     text = update.effective_message.reply_text.call_args[0][0]
-    assert "6 ساعت" in text
+    assert "30 دقیقه" in text
 
 
 @pytest.mark.anyio
-async def test_schedule_command_shows_a_stored_interval() -> None:
+async def test_schedule_command_sets_60_minutes() -> None:
     update = _make_update()
-    context = _make_context(AsyncMock())
-    _mock_db_session(context.application.bot_data["db"])
+    context = _make_context(AsyncMock(), args=["60"])
+    db = context.application.bot_data["db"]
+    _mock_db_session(db)
 
     with patch(
-        "ai_rss_news_assistant.bot.use_cases.delivery_interval",
-        return_value=86400,
-    ):
+        "ai_rss_news_assistant.bot.use_cases.set_delivery_interval",
+        new_callable=AsyncMock,
+        return_value=3600,
+    ) as mock_set:
         await schedule_command(update, context)
 
+    mock_set.assert_awaited_once_with(db, _make_update().effective_user.id, 3600)
     text = update.effective_message.reply_text.call_args[0][0]
-    assert "24 ساعت" in text
+    assert "60 دقیقه" in text
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("raw", ["5m", "90m", "weekly", "3600"])
-async def test_schedule_command_rejects_unsupported_intervals(raw: str) -> None:
-    """Only the documented presets are accepted; nothing is written."""
+async def test_schedule_command_zero_keeps_the_immediate_behavior() -> None:
     update = _make_update()
-    context = _make_context(AsyncMock(), args=[raw])
-    _mock_db_session(context.application.bot_data["db"])
-
-    with patch("ai_rss_news_assistant.bot.use_cases.set_delivery_interval") as mock_set:
-        await schedule_command(update, context)
-
-    mock_set.assert_not_called()
-    text = update.effective_message.reply_text.call_args[0][0]
-    assert "بازه‌های مجاز" in text
-
-
-@pytest.mark.anyio
-async def test_schedule_command_rejects_extra_arguments() -> None:
-    update = _make_update()
-    context = _make_context(AsyncMock(), args=["1h", "6h"])
-    _mock_db_session(context.application.bot_data["db"])
-
-    with patch("ai_rss_news_assistant.bot.use_cases.set_delivery_interval") as mock_set:
-        await schedule_command(update, context)
-
-    mock_set.assert_not_called()
-    text = update.effective_message.reply_text.call_args[0][0]
-    assert "بازه‌های مجاز" in text
-
-
-@pytest.mark.anyio
-async def test_schedule_command_accepts_the_immediate_alias() -> None:
-    update = _make_update()
-    context = _make_context(AsyncMock(), args=["فوری"])
+    context = _make_context(AsyncMock(), args=["0"])
     db = context.application.bot_data["db"]
     _mock_db_session(db)
 
@@ -1584,6 +1563,90 @@ async def test_schedule_command_accepts_the_immediate_alias() -> None:
         await schedule_command(update, context)
 
     mock_set.assert_awaited_once_with(db, _make_update().effective_user.id, 0)
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "0 دقیقه" in text
+    assert "بدون محدودیت" in text
+
+
+@pytest.mark.anyio
+async def test_schedule_command_shows_a_stored_interval() -> None:
+    update = _make_update()
+    context = _make_context(AsyncMock())
+    _mock_db_session(context.application.bot_data["db"])
+
+    with patch(
+        "ai_rss_news_assistant.bot.use_cases.delivery_interval",
+        return_value=1800,
+    ):
+        await schedule_command(update, context)
+
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "30 دقیقه" in text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("raw", ["5m", "1h", "weekly", "1.5", "-5", "abc", "", "فوری"])
+async def test_schedule_command_rejects_unsupported_intervals(raw: str) -> None:
+    """Suffixes, decimals, negatives, and non-numeric input write nothing."""
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=[raw])
+    _mock_db_session(context.application.bot_data["db"])
+
+    with patch("ai_rss_news_assistant.bot.use_cases.set_delivery_interval") as mock_set:
+        await schedule_command(update, context)
+
+    mock_set.assert_not_called()
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "بازه مجاز" in text
+
+
+@pytest.mark.anyio
+async def test_schedule_command_rejects_extra_arguments() -> None:
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=["30", "60"])
+    _mock_db_session(context.application.bot_data["db"])
+
+    with patch("ai_rss_news_assistant.bot.use_cases.set_delivery_interval") as mock_set:
+        await schedule_command(update, context)
+
+    mock_set.assert_not_called()
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "بازه مجاز" in text
+
+
+@pytest.mark.anyio
+async def test_schedule_command_accepts_the_maximum_interval() -> None:
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=[str(MAX_INTERVAL_MINUTES)])
+    db = context.application.bot_data["db"]
+    _mock_db_session(db)
+
+    with patch(
+        "ai_rss_news_assistant.bot.use_cases.set_delivery_interval",
+        new_callable=AsyncMock,
+        return_value=MAX_INTERVAL_MINUTES * 60,
+    ) as mock_set:
+        await schedule_command(update, context)
+
+    mock_set.assert_awaited_once_with(
+        db, _make_update().effective_user.id, MAX_INTERVAL_MINUTES * 60
+    )
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert f"{MAX_INTERVAL_MINUTES:,} دقیقه" in text
+
+
+@pytest.mark.anyio
+async def test_schedule_command_rejects_values_above_the_maximum() -> None:
+    update = _make_update()
+    context = _make_context(AsyncMock(), args=[str(MAX_INTERVAL_MINUTES + 1)])
+    _mock_db_session(context.application.bot_data["db"])
+
+    with patch("ai_rss_news_assistant.bot.use_cases.set_delivery_interval") as mock_set:
+        await schedule_command(update, context)
+
+    mock_set.assert_not_called()
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "بازه مجاز" in text
 
 
 @pytest.mark.anyio
@@ -2138,24 +2201,21 @@ async def test_schedule_command_rejects_the_off_alias() -> None:
 
     mock_set.assert_not_called()
     text = update.effective_message.reply_text.call_args[0][0]
-    assert "بازه‌های مجاز" in text
+    assert "بازه مجاز" in text
 
 
 @pytest.mark.anyio
-async def test_schedule_command_accepts_the_english_immediate_alias() -> None:
+async def test_schedule_command_rejects_the_english_immediate_alias() -> None:
     update = _make_update()
     context = _make_context(AsyncMock(), args=["immediate"])
-    db = context.application.bot_data["db"]
-    _mock_db_session(db)
+    _mock_db_session(context.application.bot_data["db"])
 
-    with patch(
-        "ai_rss_news_assistant.bot.use_cases.set_delivery_interval",
-        new_callable=AsyncMock,
-        return_value=0,
-    ) as mock_set:
+    with patch("ai_rss_news_assistant.bot.use_cases.set_delivery_interval") as mock_set:
         await schedule_command(update, context)
 
-    mock_set.assert_awaited_once_with(db, _TEST_TELEGRAM_USER_ID, 0)
+    mock_set.assert_not_called()
+    text = update.effective_message.reply_text.call_args[0][0]
+    assert "بازه مجاز" in text
 
 
 @pytest.mark.anyio
@@ -2168,8 +2228,8 @@ async def test_help_documents_two_step_flows_and_the_toggle() -> None:
     assert "/delivery" in text
     assert "/addfeed [url]" in text
     assert "/delfeed [id|url]" in text
-    for token in ("0", "15m", "6h", "24h"):
-        assert token in text
+    assert "/schedule 30" in text
+    assert "دقیقه" in text
 
 
 @pytest.mark.anyio
@@ -2186,5 +2246,5 @@ async def test_start_documents_the_canonical_schedule_and_cancel() -> None:
     text = update.effective_message.reply_text.call_args[0][0]
     assert "/schedule" in text
     assert "/cancel" in text
-    for token in ("0", "15m", "6h", "24h"):
-        assert token in text
+    assert "/schedule 30" in text
+    assert "دقیقه" in text
