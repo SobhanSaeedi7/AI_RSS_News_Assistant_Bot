@@ -8,16 +8,33 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "alembic>=1.13.0",
+    # Imported by every service: the database layer and the settings loader.
     "asyncpg>=0.30.0",
-    "fastapi>=0.162.0",
-    "feedparser>=6.0.14",
-    "httpx>=0.28.1",
     "pydantic-settings>=2.16.0",
     "python-dotenv>=1.2.4",
-    "python-telegram-bot>=22.8",
     "sqlalchemy[asyncio]>=2.0.40",
+]
+
+[project.optional-dependencies]
+# One extra per deployable image. Docker installs exactly one of these (see
+# Dockerfile) so the bot does not ship FastAPI and the agent does not ship
+# python-telegram-bot. Keep each entry in sync with the imports under the
+# matching package in src/ai_rss_news_assistant.
+bot = [
+    "feedparser>=6.0.14",
+    "httpx>=0.28.1",
+    "python-telegram-bot>=22.8",
+]
+worker = [
+    "feedparser>=6.0.14",
+    "python-telegram-bot>=22.8",
+]
+agent = [
+    "fastapi>=0.162.0",
     "uvicorn>=0.54.0",
+]
+migrate = [
+    "alembic>=1.13.0",
 ]
 
 [project.scripts]
@@ -30,8 +47,16 @@ requires = ["uv_build>=0.12.22,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
+# Local development and tests exercise every service, so the dev environment
+# is the union of the runtime extras plus the test-only tools.
 dev = [
     "aiosqlite>=0.19.0",
+    "alembic>=1.13.0",
+    "fastapi>=0.162.0",
+    "feedparser>=6.0.14",
+    "httpx>=0.28.1",
     "pytest>=9.1.1",
+    "python-telegram-bot>=22.8",
     "ruff>=0.17.1",
+    "uvicorn>=0.54.0",
 ]

@@ -1,12 +1,7 @@
-# Extension field: one image definition shared by the three long-running
-# services and the one-off migration job. Declaring the build once keeps the
-# services from drifting apart and gives them a single image tag.
-x-app: &app
-  build:
-    context: .
-    dockerfile: Dockerfile
-  image: ai-rss-news-assistant:local
-
+# Each service builds its own target from the shared Dockerfile, so each image
+# installs only the dependencies that service imports (see the extras in
+# pyproject.toml). The images are tagged separately so one service's build
+# cannot overwrite another's.
 services:
   db:
     image: postgres:16-alpine
@@ -26,7 +21,11 @@ services:
     restart: unless-stopped
 
   bot:
-    <<: *app
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: bot
+    image: ai-rss-news-assistant-bot:local
     depends_on:
       db:
         condition: service_healthy
@@ -55,7 +54,11 @@ services:
     restart: unless-stopped
 
   worker:
-    <<: *app
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    image: ai-rss-news-assistant-worker:local
     depends_on:
       db:
         condition: service_healthy
@@ -86,7 +89,11 @@ services:
   # API refuses all requests (503) rather than serving unauthenticated traffic.
   # The bot uses the same token value.
   agent:
-    <<: *app
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: agent
+    image: ai-rss-news-assistant-agent:local
     depends_on:
       db:
         condition: service_healthy
@@ -129,7 +136,11 @@ services:
   # straight to the Alembic CLI. DATABASE_URL is supplied from Compose
   # environment substitution; credentials are never hard-coded or logged.
   migrate:
-    <<: *app
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: migrate
+    image: ai-rss-news-assistant-migrate:local
     depends_on:
       db:
         condition: service_healthy

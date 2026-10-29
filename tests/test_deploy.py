@@ -181,6 +181,25 @@ def test_restart_policies_are_set() -> None:
     assert 'restart: "no"' in text  # the one-off migration job
 
 
+def _service_block(text: str, service: str) -> str:
+    match = re.search(
+        rf"^  {service}:\n(.*?)(?=^  \S|\Z)", text, re.MULTILINE | re.DOTALL
+    )
+    assert match is not None, f"compose.yaml has no service {service!r}"
+    return match.group(0)
+
+
+def test_each_service_builds_its_own_dockerfile_target() -> None:
+    """A service must never be built from another service's dependency set."""
+    text = COMPOSE.read_text(encoding="utf-8")
+
+    for service in ("bot", "worker", "agent", "migrate"):
+        block = _service_block(text, service)
+        assert "dockerfile: Dockerfile" in block, service
+        assert f"target: {service}" in block, service
+        assert f"image: ai-rss-news-assistant-{service}:local" in block, service
+
+
 # --- environment parity -----------------------------------------------------
 
 
@@ -252,11 +271,26 @@ def _stages(text: str) -> list[str]:
     return re.findall(r"^FROM\s+(\S+)\s+AS\s+(\w+)", text, re.MULTILINE | re.IGNORECASE)
 
 
-def _runtime_stage(text: str) -> str:
-    """Return the text of the last build stage (the one that ships)."""
-    matches = list(re.finditer(r"^FROM\s+.*$", text, re.MULTILINE | re.IGNORECASE))
-    assert matches, "Dockerfile has no FROM instruction"
-    return text[matches[-1].start() :]
+def _stage_text(text: str, name: str) -> str:
+    """Return one build stage: from its ``FROM`` line to the next stage."""
+    matches = list(
+        re.finditer(
+            r"^FROM\s+.*\bAS\s+([\w-]+)\s*$", text, re.MULTILINE | re.IGNORECASE
+        )
+    )
+    for index, match in enumerate(matches):
+        if match.group(1).lower() == name.lower():
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            return text[match.start() : end]
+    raise AssertionError(f"Dockerfile has no stage named {name!r}")
+
+
+SERVICE_TARGETS = {
+    "bot": "deps-bot",
+    "worker": "deps-worker",
+    "agent": "deps-agent",
+    "migrate": "deps-migrate",
+}
 
 
 def test_dockerfile_is_multi_stage() -> None:
@@ -267,47 +301,68 @@ def test_dockerfile_is_multi_stage() -> None:
     assert "runtime" in {name for _, name in stages}
 
 
-def test_runtime_stage_reuses_the_builder_environment() -> None:
-    runtime = _runtime_stage(_dockerfile())
-
-    assert "COPY --from=builder /opt/venv /opt/venv" in runtime
-
-
-def test_runtime_stage_does_not_install_build_tools() -> None:
-    """No resolver, compiler, or dependency install belongs in the final image."""
-    runtime = _runtime_stage(_dockerfile())
-
-    assert "uv venv" not in runtime
-    assert "uv pip install" not in runtime
-    assert "pip install" not in runtime
-
-
-def test_runtime_runs_as_the_non_root_app_user() -> None:
+def test_each_service_target_reuses_its_dependency_stage() -> None:
+    """Every target copies a venv built from exactly one dependency extra."""
     text = _dockerfile()
-    runtime = _runtime_stage(text)
 
-    assert re.search(r"^USER\s+appuser\s*$", runtime, re.MULTILINE)
+    for target, deps_stage in SERVICE_TARGETS.items():
+        stage = _stage_text(text, target)
+        assert f"COPY --from={deps_stage} /opt/venv /opt/venv" in stage, target
+
+    # Each dependency stage exports the matching extra from pyproject.toml.
+    for target, deps_stage in SERVICE_TARGETS.items():
+        assert f"--extra {target}" in _stage_text(text, deps_stage), deps_stage
+
+
+def test_service_stages_do_not_install_build_tools() -> None:
+    """No resolver, compiler, or dependency install belongs in a final image."""
+    text = _dockerfile()
+
+    for target in SERVICE_TARGETS:
+        stage = _stage_text(text, target)
+        assert "uv venv" not in stage
+        assert "uv pip install" not in stage
+        assert "pip install" not in stage
+
+
+def test_service_stages_run_as_the_non_root_app_user() -> None:
+    text = _dockerfile()
+
     assert re.search(r"uid 10001", text)
-    # The source tree is installed into site-packages, not shipped alongside.
-    assert "COPY src" not in runtime
+    for target in SERVICE_TARGETS:
+        stage = _stage_text(text, target)
+        assert re.search(r"^USER\s+appuser\s*$", stage, re.MULTILINE), target
+        # The source tree is installed into site-packages, not shipped alongside.
+        assert "COPY src" not in stage, target
 
 
 def test_entrypoint_and_default_command_are_preserved() -> None:
-    """All four Compose services reuse this contract."""
-    runtime = _runtime_stage(_dockerfile())
+    """Each service keeps the ``python -m ai_rss_news_assistant <service>`` contract."""
+    text = _dockerfile()
+    entrypoint = 'ENTRYPOINT ["python", "-m", "ai_rss_news_assistant"]'
 
-    assert 'ENTRYPOINT ["python", "-m", "ai_rss_news_assistant"]' in runtime
-    assert 'CMD ["bot"]' in runtime
-    assert "PYTHONUNBUFFERED=1" in runtime
+    for target in ("bot", "worker", "agent"):
+        stage = _stage_text(text, target)
+        assert entrypoint in stage, target
+        assert f'CMD ["{target}"]' in stage, target
+
+    # A plain `docker build .` still produces the historical bot image.
+    assert text.rstrip().endswith('CMD ["bot"]')
+    assert "PYTHONUNBUFFERED=1" in _stage_text(text, "runtime")
 
 
-def test_alembic_is_available_in_the_runtime_image() -> None:
+def test_alembic_is_available_only_in_the_migration_image() -> None:
     """The one-off migrate service runs the `alembic` console script."""
-    runtime = _runtime_stage(_dockerfile())
+    text = _dockerfile()
+    migrate = _stage_text(text, "migrate")
 
-    assert "COPY alembic.ini" in runtime
-    assert "COPY alembic/" in runtime
-    assert "/opt/venv/bin" in runtime  # the console script is on PATH
+    assert "COPY alembic.ini" in migrate
+    assert "COPY alembic/" in migrate
+    assert 'ENTRYPOINT ["alembic"]' in migrate
+    assert "/opt/venv/bin" in _stage_text(text, "runtime")  # console scripts on PATH
+
+    for target in ("bot", "worker", "agent"):
+        assert "COPY alembic" not in _stage_text(text, target), target
 
 
 # --- build context ----------------------------------------------------------

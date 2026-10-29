@@ -11,44 +11,71 @@ name = "ai-rss-news-assistant"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "alembic" },
     { name = "asyncpg" },
-    { name = "fastapi" },
-    { name = "feedparser" },
-    { name = "httpx" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
-    { name = "python-telegram-bot" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+]
+
+[package.optional-dependencies]
+agent = [
+    { name = "fastapi" },
     { name = "uvicorn" },
+]
+bot = [
+    { name = "feedparser" },
+    { name = "httpx" },
+    { name = "python-telegram-bot" },
+]
+migrate = [
+    { name = "alembic" },
+]
+worker = [
+    { name = "feedparser" },
+    { name = "python-telegram-bot" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "aiosqlite" },
+    { name = "alembic" },
+    { name = "fastapi" },
+    { name = "feedparser" },
+    { name = "httpx" },
     { name = "pytest" },
+    { name = "python-telegram-bot" },
     { name = "ruff" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "alembic", specifier = ">=1.13.0" },
+    { name = "alembic", marker = "extra == 'migrate'", specifier = ">=1.13.0" },
     { name = "asyncpg", specifier = ">=0.30.0" },
-    { name = "fastapi", specifier = ">=0.162.0" },
-    { name = "feedparser", specifier = ">=6.0.14" },
-    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "fastapi", marker = "extra == 'agent'", specifier = ">=0.162.0" },
+    { name = "feedparser", marker = "extra == 'bot'", specifier = ">=6.0.14" },
+    { name = "feedparser", marker = "extra == 'worker'", specifier = ">=6.0.14" },
+    { name = "httpx", marker = "extra == 'bot'", specifier = ">=0.28.1" },
     { name = "pydantic-settings", specifier = ">=2.16.0" },
     { name = "python-dotenv", specifier = ">=1.2.4" },
-    { name = "python-telegram-bot", specifier = ">=22.8" },
+    { name = "python-telegram-bot", marker = "extra == 'bot'", specifier = ">=22.8" },
+    { name = "python-telegram-bot", marker = "extra == 'worker'", specifier = ">=22.8" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.40" },
-    { name = "uvicorn", specifier = ">=0.54.0" },
+    { name = "uvicorn", marker = "extra == 'agent'", specifier = ">=0.54.0" },
 ]
+provides-extras = ["bot", "worker", "agent", "migrate"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "aiosqlite", specifier = ">=0.19.0" },
+    { name = "alembic", specifier = ">=1.13.0" },
+    { name = "fastapi", specifier = ">=0.162.0" },
+    { name = "feedparser", specifier = ">=6.0.14" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "pytest", specifier = ">=9.1.1" },
+    { name = "python-telegram-bot", specifier = ">=22.8" },
     { name = "ruff", specifier = ">=0.17.1" },
+    { name = "uvicorn", specifier = ">=0.54.0" },
 ]
 
 [[package]]
