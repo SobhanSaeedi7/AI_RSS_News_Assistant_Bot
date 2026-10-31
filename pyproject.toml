@@ -8,31 +8,38 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    # Imported by every service: the database layer and the settings loader.
+    # The only packages imported by all four images: the database layer.
+    # Everything else is selected per service through the extras below.
     "asyncpg>=0.30.0",
-    "pydantic-settings>=2.16.0",
-    "python-dotenv>=1.2.4",
     "sqlalchemy[asyncio]>=2.0.40",
 ]
 
 [project.optional-dependencies]
 # One extra per deployable image. Docker installs exactly one of these (see
-# Dockerfile) so the bot does not ship FastAPI and the agent does not ship
-# python-telegram-bot. Keep each entry in sync with the imports under the
-# matching package in src/ai_rss_news_assistant.
+# Dockerfile) so the bot does not ship FastAPI, the agent does not ship
+# python-telegram-bot, and the migration job does not ship either. Keep each
+# entry in sync with the imports under the matching package in
+# src/ai_rss_news_assistant.
 bot = [
     "feedparser>=6.0.14",
     "httpx>=0.28.1",
+    "pydantic-settings>=2.16.0",
+    "python-dotenv>=1.2.4",
     "python-telegram-bot>=22.8",
 ]
 worker = [
     "feedparser>=6.0.14",
+    "pydantic-settings>=2.16.0",
+    "python-dotenv>=1.2.4",
     "python-telegram-bot>=22.8",
 ]
 agent = [
     "fastapi>=0.162.0",
+    "pydantic-settings>=2.16.0",
+    "python-dotenv>=1.2.4",
     "uvicorn>=0.54.0",
 ]
+# The migration environment imports only SQLAlchemy models and Alembic.
 migrate = [
     "alembic>=1.13.0",
 ]
@@ -55,7 +62,9 @@ dev = [
     "fastapi>=0.162.0",
     "feedparser>=6.0.14",
     "httpx>=0.28.1",
+    "pydantic-settings>=2.16.0",
     "pytest>=9.1.1",
+    "python-dotenv>=1.2.4",
     "python-telegram-bot>=22.8",
     "ruff>=0.17.1",
     "uvicorn>=0.54.0",

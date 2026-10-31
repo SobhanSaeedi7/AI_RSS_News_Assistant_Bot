@@ -1,25 +1,42 @@
 # syntax=docker/dockerfile:1
 
 # ---------------------------------------------------------------------------
-# One Dockerfile, one build target per service.
+# Four independent build pipelines, one per service.
 #
-# The three services share most of their runtime (Python 3.12, SQLAlchemy,
-# asyncpg, pydantic-settings), but each has exclusive dependencies:
+# Each service has its own `<service>-builder` stage and its own final
+# `<service>` stage. No stage is the parent of another service's stage: every
+# stage starts directly from python:3.12-slim. That means
 #
-#   bot      python-telegram-bot, feedparser, httpx
-#   worker   python-telegram-bot, feedparser
-#   agent    fastapi, uvicorn
-#   migrate  alembic
+#   docker build --target bot .
+#   docker build --target worker .
+#   docker build --target agent .
+#   docker build --target migrate .
 #
-# Keeping them in one file lets every target reuse the same `builder` stage
-# (the uv install, the lockfile, and the source copy) and keeps the four images
-# from drifting apart. `compose.yaml` selects a target per service; the last
-# stage is `bot`, so a plain `docker build .` still produces the historical
-# bot image.
+# can each be built in isolation without producing or requiring another
+# service's image. The duplication is intentional: it keeps the dependency
+# sets and the build graphs visibly separate.
 #
-# Nothing from the builder stages except /opt/venv reaches a runtime image.
+# Dependencies are selected with exactly one pyproject extra per service:
+#
+#   bot      shared + feedparser, httpx, python-telegram-bot, config
+#   worker   shared + feedparser, python-telegram-bot, config
+#   agent    shared + fastapi, uvicorn, config
+#   migrate  shared + alembic
+#
+# "shared" is asyncpg + SQLAlchemy, imported by all four images.
+#
+# Each builder installs only its own extra into /opt/venv; the matching final
+# stage copies that venv and nothing else. Build tools, uv and the source tree
+# never reach a runtime image.
+#
+# The last stage is `bot`, so a plain `docker build .` still produces the
+# historical bot image.
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim AS builder
+
+# ===========================================================================
+# Migration job: Alembic + SQLAlchemy + asyncpg, plus the migration scripts.
+# ===========================================================================
+FROM python:3.12-slim AS migrate-builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -28,63 +45,21 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /build
 
-# The resolver is a build-only tool: pinning it keeps the tool that reads
-# uv.lock from changing underneath a build. The version matches the one that
-# generated the lockfile and the uv_build backend required by pyproject.toml.
+# Pinned build-only resolver; matches the uv that generated uv.lock.
 ARG UV_VERSION=0.12.22
 RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
-# Copy dependency metadata first so this layer caches on the lockfile alone.
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
-# An empty virtual environment shared by every per-service dependency stage.
-# Each child stage installs only its own extra on top of this layer.
-RUN uv venv /opt/venv --python python3.12
-
-# ---------------------------------------------------------------------------
-# Dependency stages: one per image, each installing exactly one extra.
-#   --locked      : fail instead of silently resolving a different set
-#   --no-dev      : pytest/ruff/aiosqlite never reach a runtime image
-#   --no-emit-project: the project is installed separately, as a wheel
-#   --extra X     : only the dependencies that service imports
-#   --no-deps     : the wheel install must not re-resolve the dependency set
-#   --no-editable : the package lives in site-packages, so the runtime image
-#                   does not need the source tree at all
-# ---------------------------------------------------------------------------
-FROM builder AS deps-bot
-RUN uv export --locked --no-dev --no-emit-project --extra bot \
+RUN uv venv /opt/venv --python python3.12 \
+    && uv export --locked --no-dev --no-emit-project --extra migrate \
         --format requirements-txt --output-file requirements.txt \
     && uv pip install --python /opt/venv/bin/python --no-cache -r requirements.txt \
     && uv pip install --python /opt/venv/bin/python --no-cache --no-deps --no-editable . \
     && rm -f requirements.txt
 
-FROM builder AS deps-worker
-RUN uv export --locked --no-dev --no-emit-project --extra worker \
-        --format requirements-txt --output-file requirements.txt \
-    && uv pip install --python /opt/venv/bin/python --no-cache -r requirements.txt \
-    && uv pip install --python /opt/venv/bin/python --no-cache --no-deps --no-editable . \
-    && rm -f requirements.txt
-
-FROM builder AS deps-agent
-RUN uv export --locked --no-dev --no-emit-project --extra agent \
-        --format requirements-txt --output-file requirements.txt \
-    && uv pip install --python /opt/venv/bin/python --no-cache -r requirements.txt \
-    && uv pip install --python /opt/venv/bin/python --no-cache --no-deps --no-editable . \
-    && rm -f requirements.txt
-
-FROM builder AS deps-migrate
-RUN uv export --locked --no-dev --no-emit-project --extra migrate \
-        --format requirements-txt --output-file requirements.txt \
-    && uv pip install --python /opt/venv/bin/python --no-cache -r requirements.txt \
-    && uv pip install --python /opt/venv/bin/python --no-cache --no-deps --no-editable . \
-    && rm -f requirements.txt
-
-# ---------------------------------------------------------------------------
-# Runtime base: only the interpreter, a prepared virtual environment, and an
-# unprivileged user. No compiler, no uv, no pip cache, no source tree.
-# ---------------------------------------------------------------------------
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim AS migrate
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -92,37 +67,137 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Run the application as an unprivileged user. The app only writes to
-# PostgreSQL, so it does not need ownership of any path inside the image.
-RUN useradd --create-home --uid 10001 appuser
-
-# --- one-off Alembic migration job -----------------------------------------
-FROM runtime AS migrate
-COPY --from=deps-migrate /opt/venv /opt/venv
-# Only this image needs the Alembic configuration and migration scripts.
+COPY --from=migrate-builder /opt/venv /opt/venv
+# Only the migration image needs the Alembic configuration and scripts.
 COPY alembic.ini ./
 COPY alembic/ ./alembic/
+
+RUN useradd --create-home --uid 10001 appuser
 USER appuser
+
 ENTRYPOINT ["alembic"]
 CMD ["upgrade", "head"]
 
-# --- internal FastAPI answer service ---------------------------------------
-FROM runtime AS agent
-COPY --from=deps-agent /opt/venv /opt/venv
+# ===========================================================================
+# Agent: FastAPI/Uvicorn + SQLAlchemy + asyncpg + settings.
+# ===========================================================================
+FROM python:3.12-slim AS agent-builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+WORKDIR /build
+
+ARG UV_VERSION=0.12.22
+RUN pip install --no-cache-dir "uv==${UV_VERSION}"
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+
+RUN uv venv /opt/venv --python python3.12 \
+    && uv export --locked --no-dev --no-emit-project --extra agent \
+        --format requirements-txt --output-file requirements.txt \
+    && uv pip install --python /opt/venv/bin/python --no-cache -r requirements.txt \
+    && uv pip install --python /opt/venv/bin/python --no-cache --no-deps --no-editable . \
+    && rm -f requirements.txt
+
+FROM python:3.12-slim AS agent
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:${PATH}"
+
+WORKDIR /app
+
+COPY --from=agent-builder /opt/venv /opt/venv
+
+RUN useradd --create-home --uid 10001 appuser
 USER appuser
+
 ENTRYPOINT ["python", "-m", "ai_rss_news_assistant"]
 CMD ["agent"]
 
-# --- RSS ingestion and delivery worker -------------------------------------
-FROM runtime AS worker
-COPY --from=deps-worker /opt/venv /opt/venv
+# ===========================================================================
+# Worker: Telegram delivery + RSS parsing + SQLAlchemy + asyncpg + settings.
+# ===========================================================================
+FROM python:3.12-slim AS worker-builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+WORKDIR /build
+
+ARG UV_VERSION=0.12.22
+RUN pip install --no-cache-dir "uv==${UV_VERSION}"
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+
+RUN uv venv /opt/venv --python python3.12 \
+    && uv export --locked --no-dev --no-emit-project --extra worker \
+        --format requirements-txt --output-file requirements.txt \
+    && uv pip install --python /opt/venv/bin/python --no-cache -r requirements.txt \
+    && uv pip install --python /opt/venv/bin/python --no-cache --no-deps --no-editable . \
+    && rm -f requirements.txt
+
+FROM python:3.12-slim AS worker
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:${PATH}"
+
+WORKDIR /app
+
+COPY --from=worker-builder /opt/venv /opt/venv
+
+RUN useradd --create-home --uid 10001 appuser
 USER appuser
+
 ENTRYPOINT ["python", "-m", "ai_rss_news_assistant"]
 CMD ["worker"]
 
-# --- Telegram bot (also the default `docker build .` image) ----------------
-FROM runtime AS bot
-COPY --from=deps-bot /opt/venv /opt/venv
+# ===========================================================================
+# Bot: Telegram + RSS parsing + HTTP client + SQLAlchemy + asyncpg + settings.
+# Last stage on purpose: `docker build .` keeps producing the bot image.
+# ===========================================================================
+FROM python:3.12-slim AS bot-builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+WORKDIR /build
+
+ARG UV_VERSION=0.12.22
+RUN pip install --no-cache-dir "uv==${UV_VERSION}"
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+
+RUN uv venv /opt/venv --python python3.12 \
+    && uv export --locked --no-dev --no-emit-project --extra bot \
+        --format requirements-txt --output-file requirements.txt \
+    && uv pip install --python /opt/venv/bin/python --no-cache -r requirements.txt \
+    && uv pip install --python /opt/venv/bin/python --no-cache --no-deps --no-editable . \
+    && rm -f requirements.txt
+
+FROM python:3.12-slim AS bot
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:${PATH}"
+
+WORKDIR /app
+
+COPY --from=bot-builder /opt/venv /opt/venv
+
+RUN useradd --create-home --uid 10001 appuser
 USER appuser
+
 ENTRYPOINT ["python", "-m", "ai_rss_news_assistant"]
 CMD ["bot"]

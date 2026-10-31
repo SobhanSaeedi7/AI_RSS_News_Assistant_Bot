@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,7 @@ COMPOSE = REPO_ROOT / "compose.yaml"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
+PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 # Variables a service intentionally does *not* receive. Each entry is a
 # decision, not an oversight, so adding a new setting without wiring it makes
@@ -260,6 +262,103 @@ def test_env_template_contains_no_real_secret_values() -> None:
     assert "urllib.request" not in ENV_EXAMPLE.read_text(encoding="utf-8")
 
 
+# --- packaging: one runtime extra per service ------------------------------
+
+
+def _requirement_name(requirement: str) -> str:
+    """Return the normalized project name from a PEP 508 requirement string."""
+    match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", requirement)
+    assert match is not None, requirement
+    return re.sub(r"[-_.]+", "-", match.group(1)).lower()
+
+
+def _pyproject() -> dict:
+    with PYPROJECT.open("rb") as handle:
+        return tomllib.load(handle)
+
+
+def _project_dependencies() -> set[str]:
+    project = _pyproject()["project"]
+    return {_requirement_name(item) for item in project["dependencies"]}
+
+
+def _project_extras() -> dict[str, set[str]]:
+    project = _pyproject()["project"]
+    return {
+        name: {_requirement_name(item) for item in items}
+        for name, items in project.get("optional-dependencies", {}).items()
+    }
+
+
+SERVICE_NAMES = ("bot", "worker", "agent", "migrate")
+
+# Only the database layer is imported by every image. Everything else is
+# selected by exactly one extra.
+SHARED_RUNTIME_DEPENDENCIES = {"asyncpg", "sqlalchemy"}
+
+REQUIRED_EXTRAS = {
+    "bot": {
+        "feedparser",
+        "httpx",
+        "pydantic-settings",
+        "python-dotenv",
+        "python-telegram-bot",
+    },
+    "worker": {
+        "feedparser",
+        "pydantic-settings",
+        "python-dotenv",
+        "python-telegram-bot",
+    },
+    "agent": {"fastapi", "pydantic-settings", "python-dotenv", "uvicorn"},
+    "migrate": {"alembic"},
+}
+
+FORBIDDEN_EXTRAS = {
+    "bot": {"fastapi", "uvicorn", "alembic"},
+    "worker": {"fastapi", "uvicorn", "alembic"},
+    "agent": {"feedparser", "httpx", "python-telegram-bot", "alembic"},
+    "migrate": {
+        "fastapi",
+        "uvicorn",
+        "feedparser",
+        "httpx",
+        "pydantic-settings",
+        "python-dotenv",
+        "python-telegram-bot",
+    },
+}
+
+
+def test_shared_dependencies_are_only_the_database_layer() -> None:
+    assert _project_dependencies() == SHARED_RUNTIME_DEPENDENCIES
+
+
+@pytest.mark.parametrize("service", SERVICE_NAMES)
+def test_service_extra_declares_its_runtime_dependencies(service: str) -> None:
+    extras = _project_extras()
+
+    assert service in extras, f"pyproject.toml has no {service!r} extra"
+    missing = REQUIRED_EXTRAS[service] - extras[service]
+    assert missing == set(), f"{service} extra is missing {sorted(missing)}"
+
+    unrelated = FORBIDDEN_EXTRAS[service] & extras[service]
+    assert unrelated == set(), f"{service} extra includes {sorted(unrelated)}"
+
+
+def test_development_group_covers_every_runtime_extra() -> None:
+    """`uv sync` (the documented local workflow) must install all services."""
+    pyproject = _pyproject()
+    dev = {_requirement_name(item) for item in pyproject["dependency-groups"]["dev"]}
+    installable = _project_dependencies() | dev
+
+    for service, packages in _project_extras().items():
+        missing = packages - installable
+        assert missing == set(), (
+            f"{service} extras are not installed by `uv sync`: {sorted(missing)}"
+        )
+
+
 # --- Dockerfile -------------------------------------------------------------
 
 
@@ -267,102 +366,134 @@ def _dockerfile() -> str:
     return DOCKERFILE.read_text(encoding="utf-8")
 
 
-def _stages(text: str) -> list[str]:
-    return re.findall(r"^FROM\s+(\S+)\s+AS\s+(\w+)", text, re.MULTILINE | re.IGNORECASE)
-
-
-def _stage_text(text: str, name: str) -> str:
-    """Return one build stage: from its ``FROM`` line to the next stage."""
+def _stages(text: str) -> dict[str, tuple[str, str]]:
+    """Return ``{stage: (base_image, body)}`` for every named stage."""
     matches = list(
         re.finditer(
-            r"^FROM\s+.*\bAS\s+([\w-]+)\s*$", text, re.MULTILINE | re.IGNORECASE
+            r"^FROM\s+(\S+)\s+AS\s+([\w-]+)\s*$", text, re.MULTILINE | re.IGNORECASE
         )
     )
+    stages: dict[str, tuple[str, str]] = {}
     for index, match in enumerate(matches):
-        if match.group(1).lower() == name.lower():
-            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-            return text[match.start() : end]
-    raise AssertionError(f"Dockerfile has no stage named {name!r}")
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        stages[match.group(2)] = (match.group(1), text[match.start() : end])
+    return stages
 
 
-SERVICE_TARGETS = {
-    "bot": "deps-bot",
-    "worker": "deps-worker",
-    "agent": "deps-agent",
-    "migrate": "deps-migrate",
-}
+def _last_stage_name(text: str) -> str:
+    names = [
+        match.group(1)
+        for match in re.finditer(
+            r"^FROM\s+\S+\s+AS\s+([\w-]+)\s*$", text, re.MULTILINE | re.IGNORECASE
+        )
+    ]
+    assert names, "Dockerfile has no named stages"
+    return names[-1]
 
 
-def test_dockerfile_is_multi_stage() -> None:
+def test_every_stage_starts_from_the_python_base_image() -> None:
+    """No service may inherit from another service's stage or a shared stage."""
     stages = _stages(_dockerfile())
 
-    assert len(stages) >= 2, "the image must be built in more than one stage"
-    assert "builder" in {name for _, name in stages}
-    assert "runtime" in {name for _, name in stages}
+    assert stages, "Dockerfile has no named stages"
+    for name, (base, _body) in stages.items():
+        assert base == "python:3.12-slim", f"stage {name!r} builds FROM {base}"
 
 
-def test_each_service_target_reuses_its_dependency_stage() -> None:
-    """Every target copies a venv built from exactly one dependency extra."""
+def test_each_service_has_its_own_builder_and_runtime_stage() -> None:
+    stages = _stages(_dockerfile())
+
+    expected = {f"{service}-builder" for service in SERVICE_NAMES} | set(SERVICE_NAMES)
+    assert set(stages) == expected, (
+        f"expected four independent builder/runtime pairs, found {sorted(stages)}"
+    )
+
+
+def test_each_builder_installs_exactly_its_own_extra() -> None:
+    stages = _stages(_dockerfile())
+
+    for service in SERVICE_NAMES:
+        _base, body = stages[f"{service}-builder"]
+
+        extras = re.findall(r"--extra\s+([\w-]+)", body)
+        assert extras == [service], f"{service}-builder installs {extras}"
+
+        # Reproducible, non-dev, wheel-based install from the locked set.
+        for flag in ("--locked", "--no-dev", "--no-emit-project", "--no-deps"):
+            assert flag in body, f"{service}-builder is missing {flag}"
+        assert "--no-editable" in body, service
+
+
+def test_each_runtime_copies_only_its_own_builder_venv() -> None:
+    stages = _stages(_dockerfile())
+
+    for service in SERVICE_NAMES:
+        _base, body = stages[service]
+
+        sources = re.findall(
+            r"^COPY\s+--from=(\S+)\s+/opt/venv\s+/opt/venv\s*$",
+            body,
+            re.MULTILINE,
+        )
+        assert sources == [f"{service}-builder"], (
+            f"{service} copies its venv from {sources}"
+        )
+        assert body.count("--from=") == 1, service
+
+
+def test_runtime_stages_do_not_resolve_or_install_dependencies() -> None:
+    stages = _stages(_dockerfile())
+
+    for service in SERVICE_NAMES:
+        _base, body = stages[service]
+
+        for forbidden in ("uv venv", "uv export", "uv pip", "pip install", "COPY src"):
+            assert forbidden not in body, f"{service} runtime contains {forbidden!r}"
+
+
+def test_runtime_stages_run_as_the_non_root_app_user() -> None:
     text = _dockerfile()
-
-    for target, deps_stage in SERVICE_TARGETS.items():
-        stage = _stage_text(text, target)
-        assert f"COPY --from={deps_stage} /opt/venv /opt/venv" in stage, target
-
-    # Each dependency stage exports the matching extra from pyproject.toml.
-    for target, deps_stage in SERVICE_TARGETS.items():
-        assert f"--extra {target}" in _stage_text(text, deps_stage), deps_stage
-
-
-def test_service_stages_do_not_install_build_tools() -> None:
-    """No resolver, compiler, or dependency install belongs in a final image."""
-    text = _dockerfile()
-
-    for target in SERVICE_TARGETS:
-        stage = _stage_text(text, target)
-        assert "uv venv" not in stage
-        assert "uv pip install" not in stage
-        assert "pip install" not in stage
-
-
-def test_service_stages_run_as_the_non_root_app_user() -> None:
-    text = _dockerfile()
+    stages = _stages(text)
 
     assert re.search(r"uid 10001", text)
-    for target in SERVICE_TARGETS:
-        stage = _stage_text(text, target)
-        assert re.search(r"^USER\s+appuser\s*$", stage, re.MULTILINE), target
-        # The source tree is installed into site-packages, not shipped alongside.
-        assert "COPY src" not in stage, target
+    for service in SERVICE_NAMES:
+        _base, body = stages[service]
+        assert re.search(r"^USER\s+appuser\s*$", body, re.MULTILINE), service
 
 
-def test_entrypoint_and_default_command_are_preserved() -> None:
-    """Each service keeps the ``python -m ai_rss_news_assistant <service>`` contract."""
+def test_entrypoints_and_default_command_are_preserved() -> None:
+    """Each service keeps its existing command contract."""
     text = _dockerfile()
+    stages = _stages(text)
     entrypoint = 'ENTRYPOINT ["python", "-m", "ai_rss_news_assistant"]'
 
-    for target in ("bot", "worker", "agent"):
-        stage = _stage_text(text, target)
-        assert entrypoint in stage, target
-        assert f'CMD ["{target}"]' in stage, target
+    for service in ("bot", "worker", "agent"):
+        _base, body = stages[service]
+        assert entrypoint in body, service
+        assert f'CMD ["{service}"]' in body, service
+        assert "PYTHONUNBUFFERED=1" in body, service
+        assert 'PATH="/opt/venv/bin:${PATH}"' in body, service
+
+    _base, migrate = stages["migrate"]
+    assert 'ENTRYPOINT ["alembic"]' in migrate
+    assert 'CMD ["upgrade", "head"]' in migrate
+    assert 'PATH="/opt/venv/bin:${PATH}"' in migrate
 
     # A plain `docker build .` still produces the historical bot image.
-    assert text.rstrip().endswith('CMD ["bot"]')
-    assert "PYTHONUNBUFFERED=1" in _stage_text(text, "runtime")
+    assert _last_stage_name(text) == "bot"
 
 
 def test_alembic_is_available_only_in_the_migration_image() -> None:
     """The one-off migrate service runs the `alembic` console script."""
-    text = _dockerfile()
-    migrate = _stage_text(text, "migrate")
+    stages = _stages(_dockerfile())
 
+    _base, migrate = stages["migrate"]
     assert "COPY alembic.ini" in migrate
     assert "COPY alembic/" in migrate
-    assert 'ENTRYPOINT ["alembic"]' in migrate
-    assert "/opt/venv/bin" in _stage_text(text, "runtime")  # console scripts on PATH
 
-    for target in ("bot", "worker", "agent"):
-        assert "COPY alembic" not in _stage_text(text, target), target
+    for service in ("bot", "worker", "agent"):
+        _base, body = stages[service]
+        assert "COPY alembic" not in body, service
 
 
 # --- build context ----------------------------------------------------------
